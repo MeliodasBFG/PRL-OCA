@@ -12,7 +12,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import { BOARD_TILES, Difficulty } from '@prl-oca/shared';
+import { BOARD_TILES, CHALLENGES_3D, Difficulty } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 
 export const TeacherPanel: React.FC = () => {
@@ -27,6 +27,9 @@ export const TeacherPanel: React.FC = () => {
 
   const [selectedQuestionId, setSelectedQuestionId] = useState<string>(
     questionBank[0]?.id ?? 'q_cb_01'
+  );
+  const [selectedChallengeId, setSelectedChallengeId] = useState<string>(
+    CHALLENGES_3D[4]?.id ?? 'challenge_5'
   );
 
   if (!showTeacherPanel || !roomState) return null;
@@ -238,6 +241,33 @@ export const TeacherPanel: React.FC = () => {
                 Lanzar Pregunta Seleccionada
               </button>
             </div>
+
+            <div className="tp-force-question-row">
+              <select
+                value={selectedChallengeId}
+                onChange={(e) => setSelectedChallengeId(e.target.value)}
+                aria-label="Seleccionar Desafío 3D Interactivo para lanzar"
+              >
+                {CHALLENGES_3D.map((ch) => (
+                  <option key={ch.id} value={ch.id}>
+                    [DESAFÍO 3D #{ch.number}] {ch.title} ({ch.points} pts)
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  runTeacherCommand({
+                    kind: 'FORCE_CHALLENGE',
+                    challengeId: selectedChallengeId,
+                  });
+                  setShowTeacherPanel(false);
+                }}
+              >
+                Lanzar Desafío 3D
+              </button>
+            </div>
           </section>
 
           {/* 4. Parámetros de Dados, Dificultad, Tiempos y Puntuaciones */}
@@ -315,6 +345,48 @@ export const TeacherPanel: React.FC = () => {
                         timers: {
                           ...roomState.config.timers,
                           intermedio: Number(e.target.value),
+                        },
+                      },
+                    })
+                  }
+                />
+              </label>
+
+              <label>
+                Tiempo Avanzado (s):
+                <input
+                  type="number"
+                  min={10}
+                  max={240}
+                  value={roomState.config.timers.avanzado}
+                  onChange={(e) =>
+                    runTeacherCommand({
+                      kind: 'UPDATE_CONFIG',
+                      partialConfig: {
+                        timers: {
+                          ...roomState.config.timers,
+                          avanzado: Number(e.target.value),
+                        },
+                      },
+                    })
+                  }
+                />
+              </label>
+
+              <label>
+                Tiempo Desafío 3D (s):
+                <input
+                  type="number"
+                  min={20}
+                  max={300}
+                  value={roomState.config.timers.desafio}
+                  onChange={(e) =>
+                    runTeacherCommand({
+                      kind: 'UPDATE_CONFIG',
+                      partialConfig: {
+                        timers: {
+                          ...roomState.config.timers,
+                          desafio: Number(e.target.value),
                         },
                       },
                     })

@@ -861,6 +861,7 @@ export function executeTeacherCommandServerSide(
     targetTile?: number;
     delta?: number;
     questionId?: string;
+    challengeId?: string;
     partialConfig?: Partial<GameConfig>;
   },
   customBank?: QuestionItem[]
@@ -1028,6 +1029,31 @@ export function executeTeacherCommandServerSide(
         state.phase = 'answering';
         state.logs.unshift(
           createLog('teacher', `El docente lanzó manualmente la pregunta: "${found.title}".`)
+        );
+      }
+      break;
+    }
+    case 'FORCE_CHALLENGE': {
+      const ch = CHALLENGES_3D.find((c) => c.id === command.challengeId);
+      const activeTeam = state.teams[state.activeTeamIndex];
+      if (ch && activeTeam) {
+        const duration = state.config.timers.desafio ?? ch.timeSeconds;
+        state.activeChallenge = {
+          kind: 'challenge3d',
+          challenge3d: {
+            ...ch,
+            timeSeconds: duration,
+            points: state.config.scoring.desafio ?? ch.points,
+          },
+          tileIndex: activeTeam.position,
+          teamId: activeTeam.id,
+          startedAt: now,
+          expiresAt: now + duration * 1000,
+          answered: false,
+        };
+        state.phase = 'answering';
+        state.logs.unshift(
+          createLog('teacher', `El docente lanzó manualmente el Desafío 3D: "${ch.title}".`)
         );
       }
       break;

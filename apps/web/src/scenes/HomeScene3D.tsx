@@ -31,41 +31,41 @@ const IndustrialHeroStage: React.FC<{ reducedMotion?: boolean }> = ({ reducedMot
   });
 
   return (
-    <group ref={platformRef} position={[0, -1.25, 0]}>
+    <group ref={platformRef} position={[3.3, -1.1, 0]}>
       {/* Plataforma circular industrial clara */}
       <mesh position={[0, -0.3, 0]} receiveShadow>
-        <cylinderGeometry args={[8.5, 9.2, 0.6, 48]} />
-        <meshStandardMaterial color="#1E293B" metalness={0.4} roughness={0.5} />
+        <cylinderGeometry args={[6.8, 7.4, 0.55, 48]} />
+        <meshStandardMaterial color="#334155" metalness={0.35} roughness={0.5} />
       </mesh>
       <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[7.4, 7.9, 48]} />
-        <meshStandardMaterial color="#FFB800" emissive="#FFB800" emissiveIntensity={0.45} />
+        <ringGeometry args={[5.9, 6.4, 48]} />
+        <meshStandardMaterial color="#FFB800" emissive="#FFB800" emissiveIntensity={0.55} />
       </mesh>
 
       {/* Mascota central "Prevenito" */}
-      <Mascot3D position={[0, 0.05, 1.9]} scale={1.25} mood="happy" />
+      <Mascot3D position={[0, 0.05, 1.4]} scale={1.2} mood="happy" />
 
-      {/* Edificio industrial izquierdo + engranaje + casco gigante */}
-      <RoundedBox args={[3.2, 3.4, 2.2]} radius={0.12} position={[-4.3, 1.7, -2.4]} castShadow>
-        <meshStandardMaterial color="#334155" metalness={0.45} roughness={0.4} />
+      {/* Edificio industrial izquierdo + engranaje */}
+      <RoundedBox args={[2.8, 3.1, 2.0]} radius={0.12} position={[-3.4, 1.55, -2.0]} castShadow>
+        <meshStandardMaterial color="#475569" metalness={0.4} roughness={0.4} />
       </RoundedBox>
-      <group ref={gear1Ref} position={[-4.3, 2.4, -1.15]}>
-        <Gear3D color="#FFB800" scale={2.4} />
+      <group ref={gear1Ref} position={[-3.4, 2.2, -0.85]}>
+        <Gear3D color="#FFB800" scale={2.1} />
       </group>
 
       {/* Edificio corporativo derecho + engranaje verde */}
-      <RoundedBox args={[3.2, 3.9, 2.2]} radius={0.12} position={[4.3, 1.95, -2.4]} castShadow>
-        <meshStandardMaterial color="#0284C7" metalness={0.4} roughness={0.35} />
+      <RoundedBox args={[2.8, 3.6, 2.0]} radius={0.12} position={[3.4, 1.8, -2.0]} castShadow>
+        <meshStandardMaterial color="#0284C7" metalness={0.35} roughness={0.35} />
       </RoundedBox>
-      <group ref={gear2Ref} position={[4.3, 2.5, -1.15]}>
-        <Gear3D color="#10B981" scale={2.1} />
+      <group ref={gear2Ref} position={[3.4, 2.3, -0.85]}>
+        <Gear3D color="#10B981" scale={1.9} />
       </group>
 
-      {/* Señal de advertencia, Extintor, Casco y Carretilla reconocibles */}
-      <SafetySign3D kind="warning" position={[-2.9, 0.75, 1.1]} scale={1.1} />
-      <FireExtinguisher3D variant="abc" position={[2.8, 0.05, 1.2]} scale={1.25} />
-      <SafetyHelmet3D position={[-2.3, 0.08, 2.4]} scale={1.1} />
-      <ForkliftDetailed3D position={[3.3, 0.02, -0.2]} rotation={[0, -0.6, 0]} scale={0.95} />
+      {/* Señal de advertencia, Extintor, Casco y Carretilla claramente visibles */}
+      <SafetySign3D kind="warning" position={[-2.4, 0.72, 1.0]} scale={1.05} />
+      <FireExtinguisher3D variant="abc" position={[2.2, 0.05, 1.3]} scale={1.2} />
+      <SafetyHelmet3D position={[-1.9, 0.08, 2.2]} scale={1.05} />
+      <ForkliftDetailed3D position={[2.5, 0.02, -0.3]} rotation={[0, -0.65, 0]} scale={0.95} />
     </group>
   );
 };
@@ -73,13 +73,13 @@ const IndustrialHeroStage: React.FC<{ reducedMotion?: boolean }> = ({ reducedMot
 export const HomeScene3D: React.FC<{ reducedMotion?: boolean }> = ({ reducedMotion }) => {
   return (
     <div className="home-canvas-bg" aria-hidden="true">
-      <Canvas shadows dpr={[1, 1.5]} camera={{ position: [0, 3.5, 9.6], fov: 45 }}>
-        <color attach="background" args={['#101A2C']} />
-        <fog attach="fog" args={['#101A2C', 14, 30]} />
-        <ambientLight intensity={0.95} />
-        <hemisphereLight args={['#E0F2FE', '#334155', 0.75]} />
-        <directionalLight position={[8, 12, 8]} intensity={1.7} castShadow />
-        <pointLight position={[0, 3, 4]} intensity={1.3} color="#38BDF8" />
+      <Canvas shadows dpr={[1, 1.5]} camera={{ position: [0.6, 3.2, 10.4], fov: 44 }}>
+        <color attach="background" args={['#18253A']} />
+        <fog attach="fog" args={['#18253A', 18, 36]} />
+        <ambientLight intensity={1.15} />
+        <hemisphereLight args={['#E0F2FE', '#475569', 0.9]} />
+        <directionalLight position={[8, 12, 8]} intensity={1.85} castShadow />
+        <pointLight position={[3, 4, 5]} intensity={1.4} color="#FFFFFF" />
         <IndustrialHeroStage reducedMotion={reducedMotion} />
         {!reducedMotion && (
           <Sparkles count={45} scale={[16, 6, 12]} size={2} speed={0.4} color="#FFB800" />

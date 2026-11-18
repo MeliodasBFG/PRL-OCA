@@ -26,14 +26,17 @@ function makeSignCanvasTexture(
     ctx.strokeRect(8, 8, 240, 240);
 
     ctx.fillStyle = textColor;
-    ctx.font = title ? '900 96px Inter, Segoe UI, sans-serif' : '900 130px Inter, Segoe UI, sans-serif';
+    const baseSize = symbol.length >= 6 ? 48 : symbol.length >= 4 ? 64 : 110;
+    ctx.font = title
+      ? `900 ${baseSize}px Inter, Segoe UI, sans-serif`
+      : '900 120px Inter, Segoe UI, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(symbol, 128, title ? 105 : 128);
 
     if (title) {
-      ctx.font = '900 34px Inter, Segoe UI, sans-serif';
-      ctx.fillText(title, 128, 198);
+      ctx.font = '900 28px Inter, Segoe UI, sans-serif';
+      ctx.fillText(title, 128, 194);
     }
   }
   const tex = new THREE.CanvasTexture(canvas);

@@ -122,6 +122,10 @@ export const TeacherCommandSchema = z.discriminatedUnion('kind', [
     questionId: z.string().min(1),
   }),
   z.object({
+    kind: z.literal('FORCE_CHALLENGE'),
+    challengeId: z.string().min(1),
+  }),
+  z.object({
     kind: z.literal('UPDATE_CONFIG'),
     partialConfig: GameConfigSchema.partial(),
   }),

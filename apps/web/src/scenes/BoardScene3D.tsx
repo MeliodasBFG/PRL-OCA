@@ -73,8 +73,8 @@ const CameraController: React.FC<{
   useFrame((_, delta) => {
     switch (cameraView) {
       case 'isometric':
-        desiredPos.current.set(0, 25, 29);
-        desiredTarget.current.set(0, 0.5, 0);
+        desiredPos.current.set(0, 29, 34);
+        desiredTarget.current.set(0, 0.2, 0);
         break;
       case 'path_close':
         desiredPos.current.set(12, 14, 18);
@@ -186,7 +186,7 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
       <Canvas
         shadows={enableShadows}
         dpr={dpr}
-        camera={{ position: [0, 25, 29], fov: 44, near: 0.1, far: 150 }}
+        camera={{ position: [0, 29, 34], fov: 44, near: 0.1, far: 160 }}
       >
         {/* Iluminación brillante y equilibrada para que todos los modelos 3D sean nítidos */}
         <color attach="background" args={['#121C2D']} />

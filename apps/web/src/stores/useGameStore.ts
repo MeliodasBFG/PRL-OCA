@@ -188,6 +188,7 @@ export interface GameStore {
     targetTile?: number;
     delta?: number;
     questionId?: string;
+    challengeId?: string;
     partialConfig?: Partial<GameConfig>;
   }) => void;
 

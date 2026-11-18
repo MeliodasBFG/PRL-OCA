@@ -395,6 +395,7 @@ export type ClientToServerMessage =
         | { kind: 'SKIP_QUESTION' }
         | { kind: 'REPEAT_QUESTION' }
         | { kind: 'FORCE_QUESTION'; questionId: string }
+        | { kind: 'FORCE_CHALLENGE'; challengeId: string }
         | { kind: 'UPDATE_CONFIG'; partialConfig: Partial<GameConfig> };
     }
   | {
