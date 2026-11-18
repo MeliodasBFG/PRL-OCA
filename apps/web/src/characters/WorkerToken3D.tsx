@@ -4,6 +4,7 @@ import { Html, RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
 import { BOARD_TILES, Team } from '@prl-oca/shared';
 import { soundEngine } from '../audio/SoundEngine';
+import { SafetyHelmet3D } from '../models/PRLModels3D';
 
 interface WorkerToken3DProps {
   team: Team;
@@ -21,9 +22,9 @@ interface WorkerToken3DProps {
 }
 
 /**
- * Ficha 3D animada de cada equipo: trabajador con casco de seguridad,
- * uniforme del color del equipo, tiras reflectantes, botas S3 y desplazamiento
- * casilla por casilla a ritmo cinematográfico (~0.52s por casilla).
+ * Ficha 3D detallada de cada equipo: operario estilizado con botas de seguridad S3,
+ * mono de trabajo del color del equipo, chaleco reflectante de alta visibilidad,
+ * guantes protectores, gafas panorámicas y casco EN 397 con cresta y visera.
  */
 export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
   team,
@@ -36,10 +37,10 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
   onActiveTokenArrive,
 }) => {
   const groupRef = useRef<THREE.Group>(null);
-  const leftLegRef = useRef<THREE.Mesh>(null);
-  const rightLegRef = useRef<THREE.Mesh>(null);
-  const leftArmRef = useRef<THREE.Mesh>(null);
-  const rightArmRef = useRef<THREE.Mesh>(null);
+  const leftLegRef = useRef<THREE.Group>(null);
+  const rightLegRef = useRef<THREE.Group>(null);
+  const leftArmRef = useRef<THREE.Group>(null);
+  const rightArmRef = useRef<THREE.Group>(null);
 
   const [visualTileIndex, setVisualTileIndex] = useState<number>(team.position);
   const [nextStepTileIndex, setNextStepTileIndex] = useState<number>(team.position);
@@ -79,10 +80,8 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
       BOARD_TILES.find((tile) => tile.index === nextStepTileIndex) ?? currentTile;
 
     if (isWalkingRef.current) {
-      // Smooth, readable step speed: ~0.52 seconds per tile hop
       stepProgressRef.current += Math.min(delta, 0.05) * 1.9;
       const rawP = Math.min(1, stepProgressRef.current);
-      // Smoothstep easing so each hop accelerates and decelerates naturally
       const p = rawP * rawP * (3 - 2 * rawP);
 
       const x =
@@ -98,7 +97,6 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
         onActiveTokenProgress?.([x, baseY + 0.35, z], nextStepTileIndex, true);
       }
 
-      // Face movement direction
       const dx = targetStepTile.position[0] - currentTile.position[0];
       const dz = targetStepTile.position[2] - currentTile.position[2];
       if (Math.abs(dx) + Math.abs(dz) > 0.01) {
@@ -110,7 +108,6 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
         );
       }
 
-      // Swing legs & arms while walking
       const swing = Math.sin(rawP * Math.PI * 2) * 0.65;
       if (leftLegRef.current) leftLegRef.current.rotation.x = swing;
       if (rightLegRef.current) rightLegRef.current.rotation.x = -swing;
@@ -162,87 +159,98 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
   return (
     <group ref={groupRef}>
       {/* Peana circular luminosa del equipo */}
-      <mesh position={[0, -0.12, 0]} receiveShadow castShadow>
-        <cylinderGeometry args={[0.38, 0.44, 0.12, 24]} />
+      <mesh position={[0, -0.14, 0]} receiveShadow castShadow>
+        <cylinderGeometry args={[0.42, 0.48, 0.12, 24]} />
         <meshStandardMaterial
           color={team.hexColor}
-          metalness={0.5}
+          metalness={0.45}
           roughness={0.25}
           emissive={team.hexColor}
-          emissiveIntensity={isActiveTurn ? 0.75 : 0.2}
+          emissiveIntensity={isActiveTurn ? 0.8 : 0.25}
         />
       </mesh>
 
-      {/* Piernas y Botas de seguridad */}
-      <mesh ref={leftLegRef} position={[-0.12, 0.12, 0]} castShadow>
-        <capsuleGeometry args={[0.07, 0.22, 8, 12]} />
-        <meshStandardMaterial color="#1E293B" roughness={0.6} />
-      </mesh>
-      <mesh ref={rightLegRef} position={[0.12, 0.12, 0]} castShadow>
-        <capsuleGeometry args={[0.07, 0.22, 8, 12]} />
-        <meshStandardMaterial color="#1E293B" roughness={0.6} />
-      </mesh>
+      {/* Piernas con pantalón de trabajo + botas S3 */}
+      <group ref={leftLegRef} position={[-0.13, 0.16, 0]}>
+        <mesh position={[0, 0, 0]} castShadow>
+          <capsuleGeometry args={[0.075, 0.18, 8, 12]} />
+          <meshStandardMaterial color="#1E293B" roughness={0.65} />
+        </mesh>
+        <RoundedBox args={[0.14, 0.1, 0.24]} radius={0.03} position={[0, -0.14, 0.04]} castShadow>
+          <meshStandardMaterial color="#0F172A" roughness={0.7} />
+        </RoundedBox>
+      </group>
+      <group ref={rightLegRef} position={[0.13, 0.16, 0]}>
+        <mesh position={[0, 0, 0]} castShadow>
+          <capsuleGeometry args={[0.075, 0.18, 8, 12]} />
+          <meshStandardMaterial color="#1E293B" roughness={0.65} />
+        </mesh>
+        <RoundedBox args={[0.14, 0.1, 0.24]} radius={0.03} position={[0, -0.14, 0.04]} castShadow>
+          <meshStandardMaterial color="#0F172A" roughness={0.7} />
+        </RoundedBox>
+      </group>
 
-      {/* Torso con uniforme del color del equipo */}
-      <RoundedBox args={[0.44, 0.48, 0.28]} radius={0.08} position={[0, 0.5, 0]} castShadow>
-        <meshStandardMaterial color={team.hexColor} metalness={0.25} roughness={0.45} />
+      {/* Torso con uniforme del equipo y chaleco reflectante */}
+      <RoundedBox args={[0.46, 0.5, 0.3]} radius={0.09} position={[0, 0.52, 0]} castShadow>
+        <meshStandardMaterial color={team.hexColor} metalness={0.25} roughness={0.4} />
       </RoundedBox>
-
-      {/* Bandas reflectantes de alta visibilidad */}
-      <mesh position={[0, 0.45, 0]}>
-        <boxGeometry args={[0.46, 0.06, 0.3]} />
-        <meshStandardMaterial
-          color="#FDE047"
-          emissive="#FDE047"
-          emissiveIntensity={0.4}
-          metalness={0.5}
-          roughness={0.2}
-        />
+      {/* Tiras reflectantes horizontales y verticales */}
+      <mesh position={[0, 0.44, 0]}>
+        <boxGeometry args={[0.48, 0.06, 0.32]} />
+        <meshStandardMaterial color="#FDE047" emissive="#FACC15" emissiveIntensity={0.45} />
+      </mesh>
+      <mesh position={[-0.12, 0.54, 0]}>
+        <boxGeometry args={[0.06, 0.44, 0.32]} />
+        <meshStandardMaterial color="#FDE047" emissive="#FACC15" emissiveIntensity={0.45} />
+      </mesh>
+      <mesh position={[0.12, 0.54, 0]}>
+        <boxGeometry args={[0.06, 0.44, 0.32]} />
+        <meshStandardMaterial color="#FDE047" emissive="#FACC15" emissiveIntensity={0.45} />
       </mesh>
 
-      {/* Brazos */}
-      <mesh ref={leftArmRef} position={[-0.3, 0.48, 0]} castShadow>
-        <capsuleGeometry args={[0.065, 0.26, 8, 12]} />
-        <meshStandardMaterial color={team.hexColor} roughness={0.5} />
-      </mesh>
-      <mesh ref={rightArmRef} position={[0.3, 0.48, 0]} castShadow>
-        <capsuleGeometry args={[0.065, 0.26, 8, 12]} />
-        <meshStandardMaterial color={team.hexColor} roughness={0.5} />
-      </mesh>
+      {/* Brazos con guantes protectores */}
+      <group ref={leftArmRef} position={[-0.31, 0.56, 0]}>
+        <mesh position={[0, -0.1, 0]} castShadow>
+          <capsuleGeometry args={[0.065, 0.24, 8, 12]} />
+          <meshStandardMaterial color={team.hexColor} roughness={0.5} />
+        </mesh>
+        <mesh position={[0, -0.26, 0]} castShadow>
+          <sphereGeometry args={[0.075, 12, 12]} />
+          <meshStandardMaterial color="#FFB800" />
+        </mesh>
+      </group>
+      <group ref={rightArmRef} position={[0.31, 0.56, 0]}>
+        <mesh position={[0, -0.1, 0]} castShadow>
+          <capsuleGeometry args={[0.065, 0.24, 8, 12]} />
+          <meshStandardMaterial color={team.hexColor} roughness={0.5} />
+        </mesh>
+        <mesh position={[0, -0.26, 0]} castShadow>
+          <sphereGeometry args={[0.075, 12, 12]} />
+          <meshStandardMaterial color="#FFB800" />
+        </mesh>
+      </group>
 
-      {/* Cabeza */}
-      <mesh position={[0, 0.9, 0]} castShadow>
-        <sphereGeometry args={[0.2, 20, 20]} />
+      {/* Cabeza + ojos + gafas panorámicas */}
+      <mesh position={[0, 0.94, 0]} castShadow>
+        <sphereGeometry args={[0.21, 20, 20]} />
         <meshStandardMaterial color="#FDE68A" roughness={0.45} />
       </mesh>
-
-      {/* Gafas de seguridad transparentes */}
-      <mesh position={[0, 0.92, 0.17]}>
-        <boxGeometry args={[0.26, 0.08, 0.06]} />
+      <mesh position={[0, 0.96, 0.17]}>
+        <boxGeometry args={[0.28, 0.09, 0.06]} />
         <meshStandardMaterial
           color="#38BDF8"
           emissive="#0284C7"
-          emissiveIntensity={0.35}
-          metalness={0.8}
+          emissiveIntensity={0.4}
+          metalness={0.75}
           roughness={0.1}
         />
       </mesh>
 
-      {/* Casco de seguridad industrial */}
-      <group position={[0, 1.02, 0]}>
-        <mesh castShadow>
-          <sphereGeometry args={[0.23, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.55]} />
-          <meshStandardMaterial color="#FFB800" metalness={0.3} roughness={0.25} />
-        </mesh>
-        <mesh position={[0, 0.01, 0.14]} rotation={[0.15, 0, 0]}>
-          <boxGeometry args={[0.32, 0.03, 0.18]} />
-          <meshStandardMaterial color="#F59E0B" metalness={0.3} roughness={0.3} />
-        </mesh>
-      </group>
+      {/* Casco de seguridad industrial detallado */}
+      <SafetyHelmet3D color="#FFB800" scale={0.74} position={[0, 1.04, 0]} />
 
-      {/* Etiqueta compacta solo para la ficha con el turno activo y cuando no hay modales abiertos */}
       {!hideHtmlOverlays && isActiveTurn && (
-        <Html position={[0, 1.48, 0]} center zIndexRange={[8, 0]}>
+        <Html position={[0, 1.54, 0]} center zIndexRange={[8, 0]}>
           <div
             className="active-token-pill"
             style={{

@@ -52,13 +52,11 @@ const CameraController: React.FC<{
   const transitionRemainingRef = useRef<number>(1.0);
   const userInteractingRef = useRef<boolean>(false);
 
-  // Trigger smooth camera transition when cameraView or cameraResetKey changes
   useEffect(() => {
     userInteractingRef.current = false;
     transitionRemainingRef.current = reducedMotion ? 0.15 : 1.1;
   }, [cameraView, cameraResetKey, reducedMotion]);
 
-  // Apply on-screen zoom buttons (+ / -)
   useEffect(() => {
     if (cameraZoomDelta === 0 || !controlsRef.current) return;
     const target = controlsRef.current.target;
@@ -73,7 +71,6 @@ const CameraController: React.FC<{
   }, [cameraZoomDelta, camera]);
 
   useFrame((_, delta) => {
-    // Update target coordinates for the selected camera preset
     switch (cameraView) {
       case 'isometric':
         desiredPos.current.set(0, 25, 29);
@@ -109,8 +106,6 @@ const CameraController: React.FC<{
         break;
     }
 
-    // Only animate camera during preset transition or while following the walking token,
-    // and never fight the user when they drag/orbit manually
     const shouldFollow =
       !userInteractingRef.current &&
       (transitionRemainingRef.current > 0 || (isTokenWalking && cameraView === 'active_tile'));
@@ -193,14 +188,15 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
         dpr={dpr}
         camera={{ position: [0, 25, 29], fov: 44, near: 0.1, far: 150 }}
       >
-        <color attach="background" args={['#090D16']} />
-        <fog attach="fog" args={['#090D16', 38, 78]} />
+        {/* Iluminación brillante y equilibrada para que todos los modelos 3D sean nítidos */}
+        <color attach="background" args={['#121C2D']} />
+        <fog attach="fog" args={['#121C2D', 48, 92]} />
 
-        <ambientLight intensity={0.65} />
-        <hemisphereLight args={['#38BDF8', '#0F172A', 0.55]} />
+        <ambientLight intensity={0.95} />
+        <hemisphereLight args={['#E0F2FE', '#334155', 0.8]} />
         <directionalLight
           position={[18, 28, 16]}
-          intensity={1.45}
+          intensity={1.75}
           castShadow={enableShadows}
           shadow-mapSize-width={graphicsQuality === 'ultra' ? 2048 : 1024}
           shadow-mapSize-height={graphicsQuality === 'ultra' ? 2048 : 1024}
@@ -210,6 +206,7 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
           shadow-camera-top={25}
           shadow-camera-bottom={-25}
         />
+        <directionalLight position={[-16, 14, -14]} intensity={0.7} color="#93C5FD" />
         <pointLight position={[0, 6, 0]} intensity={1.1} color="#FFB800" distance={18} />
 
         <CameraController
@@ -221,10 +218,8 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
           reducedMotion={reducedMotion}
         />
 
-        {/* Escenario Industrial 3D con las 12 zonas y carteles 3D integrados */}
         <IndustrialZones3D reducedMotion={reducedMotion} />
 
-        {/* Las 48 Casillas 3D */}
         {BOARD_TILES.map((tile) => {
           const isOccupied = teams.some((t) => t.position === tile.index);
           const isActiveTile =
@@ -241,7 +236,6 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
           );
         })}
 
-        {/* Fichas 3D Animadas de los Equipos */}
         {teams.map((team, idx) => (
           <WorkerToken3D
             key={team.id}
@@ -256,10 +250,8 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
           />
         ))}
 
-        {/* Dados 3D con animación de lanzamiento y resultado autoritativo */}
         <Dice3D diceValues={diceValues} isRolling={isRolling} position={[0, 2.3, 4.2]} />
 
-        {/* Partículas ambientales en calidades Media, Alta y Ultra */}
         {graphicsQuality !== 'baja' && !reducedMotion && (
           <Sparkles
             count={graphicsQuality === 'ultra' ? 90 : 45}

@@ -80,9 +80,10 @@ export const VictoryScreen: React.FC = () => {
         <div className="victory-hero-card">
           <div className="victory-3d-stage">
             <Canvas camera={{ position: [0, 1.8, 5.2], fov: 42 }}>
-              <color attach="background" args={['#0B1220']} />
-              <ambientLight intensity={0.8} />
-              <directionalLight position={[5, 8, 5]} intensity={1.4} />
+              <color attach="background" args={['#142033']} />
+              <ambientLight intensity={1.0} />
+              <hemisphereLight args={['#E0F2FE', '#334155', 0.75]} />
+              <directionalLight position={[5, 8, 5]} intensity={1.6} />
               <Mascot3D position={[0, -0.8, 0]} scale={1.15} mood="celebrate" />
               {allUnlockedBadges.slice(0, 4).map((bId, idx) => (
                 <Badge3D

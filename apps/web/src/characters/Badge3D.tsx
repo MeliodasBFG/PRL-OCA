@@ -2,6 +2,11 @@ import React, { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { BADGE_DEFINITIONS, BadgeId } from '@prl-oca/shared';
+import {
+  ClipboardMagnifier3D,
+  SafetyHelmet3D,
+  SafetySign3D,
+} from '../models/PRLModels3D';
 
 interface Badge3DProps {
   badgeId: BadgeId;
@@ -10,7 +15,7 @@ interface Badge3DProps {
 }
 
 /**
- * Representación 3D de cada una de las 7 insignias preventivas desbloqueables.
+ * Representación 3D detallada de cada una de las 7 insignias preventivas desbloqueables.
  */
 export const Badge3D: React.FC<Badge3DProps> = ({
   badgeId,
@@ -29,9 +34,9 @@ export const Badge3D: React.FC<Badge3DProps> = ({
 
   return (
     <group ref={ref} position={position} scale={scale}>
-      {/* Medalla exterior biselada */}
+      {/* Medalla hexagonal metálica */}
       <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
-        <cylinderGeometry args={[0.55, 0.55, 0.1, 6]} />
+        <cylinderGeometry args={[0.56, 0.56, 0.1, 6]} />
         <meshStandardMaterial
           color={def.color}
           metalness={0.75}
@@ -42,20 +47,61 @@ export const Badge3D: React.FC<Badge3DProps> = ({
       </mesh>
       {/* Aro dorado interior */}
       <mesh position={[0, 0, 0.06]}>
-        <torusGeometry args={[0.38, 0.04, 12, 24]} />
+        <torusGeometry args={[0.4, 0.045, 12, 24]} />
         <meshStandardMaterial color="#FFB800" metalness={0.85} roughness={0.15} />
       </mesh>
-      {/* Emblema central 3D según tipo */}
-      <mesh position={[0, 0, 0.08]}>
-        {def.iconShape === 'helmet' && <sphereGeometry args={[0.2, 16, 16]} />}
-        {def.iconShape === 'sign' && <coneGeometry args={[0.22, 0.32, 3]} />}
-        {def.iconShape === 'magnifier' && <torusGeometry args={[0.15, 0.04, 12, 20]} />}
-        {def.iconShape === 'siren' && <cylinderGeometry args={[0.14, 0.18, 0.25, 16]} />}
-        {def.iconShape === 'chair' && <boxGeometry args={[0.22, 0.26, 0.16]} />}
-        {def.iconShape === 'clipboard' && <boxGeometry args={[0.22, 0.28, 0.06]} />}
-        {def.iconShape === 'shield' && <octahedronGeometry args={[0.22, 0]} />}
-        <meshStandardMaterial color="#FFFFFF" metalness={0.5} roughness={0.2} />
-      </mesh>
+      {/* Emblema 3D reconocible según tipo */}
+      <group position={[0, 0, 0.12]}>
+        {def.iconShape === 'helmet' && <SafetyHelmet3D scale={0.72} position={[0, -0.05, 0]} />}
+        {def.iconShape === 'sign' && <SafetySign3D kind="warning" scale={0.55} />}
+        {def.iconShape === 'magnifier' && (
+          <group>
+            <mesh position={[-0.04, 0.05, 0]}>
+              <torusGeometry args={[0.14, 0.035, 10, 20]} />
+              <meshStandardMaterial color="#FFFFFF" metalness={0.8} />
+            </mesh>
+            <mesh position={[0.1, -0.1, 0]} rotation={[0, 0, 0.78]}>
+              <boxGeometry args={[0.05, 0.22, 0.04]} />
+              <meshStandardMaterial color="#FFB800" />
+            </mesh>
+          </group>
+        )}
+        {def.iconShape === 'siren' && (
+          <mesh>
+            <cylinderGeometry args={[0.13, 0.17, 0.24, 16]} />
+            <meshStandardMaterial color="#FFFFFF" emissive="#EF4444" emissiveIntensity={0.6} />
+          </mesh>
+        )}
+        {def.iconShape === 'chair' && (
+          <group position={[0, -0.1, 0]}>
+            <mesh position={[0, 0.04, 0]}>
+              <boxGeometry args={[0.24, 0.06, 0.22]} />
+              <meshStandardMaterial color="#FFFFFF" />
+            </mesh>
+            <mesh position={[0, 0.18, -0.08]}>
+              <boxGeometry args={[0.22, 0.26, 0.06]} />
+              <meshStandardMaterial color="#FFFFFF" />
+            </mesh>
+          </group>
+        )}
+        {def.iconShape === 'clipboard' && <ClipboardMagnifier3D scale={0.65} />}
+        {def.iconShape === 'shield' && (
+          <group>
+            <mesh>
+              <cylinderGeometry args={[0.24, 0.16, 0.08, 6]} />
+              <meshStandardMaterial color="#FFFFFF" metalness={0.5} />
+            </mesh>
+            <mesh position={[0, 0.05, 0.05]}>
+              <boxGeometry args={[0.22, 0.06, 0.04]} />
+              <meshStandardMaterial color="#10B981" />
+            </mesh>
+            <mesh position={[0, 0.05, 0.05]}>
+              <boxGeometry args={[0.06, 0.22, 0.04]} />
+              <meshStandardMaterial color="#10B981" />
+            </mesh>
+          </group>
+        )}
+      </group>
     </group>
   );
 };
