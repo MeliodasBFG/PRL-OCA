@@ -1,0 +1,28 @@
+{
+  "name": "prl-oca-3d",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PRL-OCA 3D ONLINE - Videojuego de mesa 3D multijugador de Prevención de Riesgos Laborales",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@prl-oca/web",
+    "dev:realtime": "npm run dev --workspace=@prl-oca/realtime",
+    "build": "npm run build --workspace=@prl-oca/shared && npm run build --workspace=@prl-oca/web && npm run build --workspace=@prl-oca/realtime",
+    "build:web": "npm run build --workspace=@prl-oca/shared && npm run build --workspace=@prl-oca/web",
+    "build:realtime": "npm run build --workspace=@prl-oca/shared && npm run build --workspace=@prl-oca/realtime",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

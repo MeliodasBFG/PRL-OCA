@@ -1,0 +1,71 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "prl-oca-realtime",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "vars": {
+    "ALLOWED_ORIGIN": "*",
+    "ENVIRONMENT": "development"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GAME_ROOMS",
+        "class_name": "GameRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GameRoom"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "prl-oca-db",
+      "database_id": "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  // Descomenta el bloque r2_buckets cuando crees el bucket R2 opcional para modelos GLB externos:
+  // "r2_buckets": [
+  //   {
+  //     "binding": "ASSETS_BUCKET",
+  //     "bucket_name": "prl-oca-3d-assets"
+  //   }
+  // ],
+  "env": {
+    "preview": {
+      "name": "prl-oca-realtime-preview",
+      "vars": {
+        "ALLOWED_ORIGIN": "*",
+        "ENVIRONMENT": "preview"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "GAME_ROOMS",
+            "class_name": "GameRoom"
+          }
+        ]
+      }
+    },
+    "production": {
+      "name": "prl-oca-realtime",
+      "vars": {
+        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev",
+        "ENVIRONMENT": "production"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "GAME_ROOMS",
+            "class_name": "GameRoom"
+          }
+        ]
+      }
+    }
+  }
+}

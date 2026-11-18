@@ -1,0 +1,34 @@
+name: CI - Validación, Pruebas y Compilación PRL-OCA 3D
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+jobs:
+  validate-and-build:
+    name: TypeScript + Vitest (15 Jugadores) + Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias del monorepositorio
+        run: npm install
+
+      - name: Comprobar tipos TypeScript (Shared, Web y Realtime)
+        run: npm run typecheck
+
+      - name: Ejecutar suite de pruebas automatizadas (Motor + 15 Jugadores WebSocket)
+        run: npm test
+
+      - name: Compilar aplicación frontend (Vite + Three.js) y validar backend
+        run: npm run build

@@ -1,0 +1,59 @@
+name: Deploy Manual Opcional - Cloudflare Pages & Workers
+
+# Nota importante (Sección 23):
+# Por defecto se recomienda la integración nativa Git de Cloudflare Pages y Workers Builds
+# para evitar despliegues duplicados. Este workflow manual (workflow_dispatch) permite
+# desplegar bajo demanda mediante Wrangler cuando se desee usar GitHub Actions.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Entorno de destino (preview o production)'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - preview
+          - production
+
+jobs:
+  deploy-cloudflare:
+    name: Desplegar Worker (prl-oca-realtime) y Pages (prl-oca-3d)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Ejecutar pruebas antes del despliegue
+        run: npm test
+
+      - name: Compilar Frontend para Cloudflare Pages
+        run: npm run build:web
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          VITE_WS_URL: ${{ vars.VITE_WS_URL }}
+
+      - name: Desplegar Backend Worker + Durable Objects (prl-oca-realtime)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/realtime
+          command: deploy --env ${{ inputs.environment }}
+
+      - name: Desplegar Frontend en Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy apps/web/dist --project-name=prl-oca-3d
