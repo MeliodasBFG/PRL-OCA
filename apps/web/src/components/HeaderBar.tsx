@@ -4,6 +4,7 @@ import {
   Eye,
   Home,
   QrCode,
+  RotateCcw,
   Settings,
   ShieldAlert,
   Sliders,
@@ -34,6 +35,7 @@ export const HeaderBar: React.FC = () => {
     projectorMode,
     captionToast,
     setCameraView,
+    resetCamera,
     setBoard2DMode,
     setProjectorMode,
     setShowQRModal,
@@ -54,7 +56,7 @@ export const HeaderBar: React.FC = () => {
     <header className="top-header-bar" role="banner">
       <div className="header-brand" onClick={() => (roomState ? null : leaveRoom())}>
         <div className="logo-shield" aria-hidden="true">
-          <svg viewBox="0 0 48 48" width="36" height="36">
+          <svg viewBox="0 0 48 48" width="34" height="34">
             <path
               d="M24 4L42 12V25C42 36 34 42 24 45C14 42 6 36 6 25V12L24 4Z"
               fill="#1E293B"
@@ -81,7 +83,7 @@ export const HeaderBar: React.FC = () => {
             onClick={() => setShowQRModal(true)}
             title="Mostrar código QR y enlace para compartir"
           >
-            <QrCode size={16} />
+            <QrCode size={15} />
             <span>SALA: {roomState.roomCode}</span>
             <span
               className={`conn-dot ${
@@ -109,10 +111,11 @@ export const HeaderBar: React.FC = () => {
                 <button
                   type="button"
                   className="btn-ghost-sm"
-                  onClick={() => setCameraView('isometric')}
+                  onClick={resetCamera}
                   title="Recuperar perspectiva original"
                 >
-                  Reset Vista
+                  <RotateCcw size={13} />
+                  <span className="hide-mobile">Reset Vista</span>
                 </button>
               </div>
 
@@ -122,7 +125,7 @@ export const HeaderBar: React.FC = () => {
                 onClick={() => setBoard2DMode(!board2DMode)}
                 title="Alternar entre Tablero 3D y Tablero 2D simplificado"
               >
-                {board2DMode ? 'Ver Tablero 3D' : 'Modo 2D Ligero'}
+                {board2DMode ? 'Ver 3D' : 'Modo 2D'}
               </button>
             </>
           )}
@@ -131,7 +134,7 @@ export const HeaderBar: React.FC = () => {
 
       {/* Avisos visuales de sonido (Accesibilidad) */}
       {captionToast && (
-        <div className="sound-caption-pill" role="status" aria-live="polite">
+        <div className="sound-caption-pill hide-mobile" role="status" aria-live="polite">
           {captionToast}
         </div>
       )}
@@ -144,8 +147,8 @@ export const HeaderBar: React.FC = () => {
             className="btn-teacher"
             onClick={() => setShowTeacherPanel(true)}
           >
-            <Sliders size={16} />
-            <span>Panel Docente</span>
+            <Sliders size={15} />
+            <span className="hide-mobile">Panel Docente</span>
           </button>
         )}
 
@@ -158,7 +161,7 @@ export const HeaderBar: React.FC = () => {
           >
             <Eye size={16} />
             <span className="hide-mobile">
-              {projectorMode ? 'Salir Proyección' : 'Modo Proyección'}
+              {projectorMode ? 'Salir Proyección' : 'Proyección'}
             </span>
           </button>
         )}

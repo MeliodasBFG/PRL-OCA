@@ -33,7 +33,14 @@ const QUESTION_TYPE_LABELS: Record<string, string> = {
 };
 
 export const QuestionModal: React.FC = () => {
-  const { roomState, submitAnswer, nextTurn } = useGameStore();
+  const {
+    roomState,
+    isRollingAnimation,
+    isTokenMoving,
+    challengeModalReady,
+    submitAnswer,
+    nextTurn,
+  } = useGameStore();
   const activeChallenge = roomState?.activeChallenge;
 
   const [selected, setSelected] = useState<number[]>([]);
@@ -45,13 +52,21 @@ export const QuestionModal: React.FC = () => {
   const activeTeam = roomState?.teams[roomState.activeTeamIndex ?? 0];
   const tile = BOARD_TILES.find((t) => t.index === activeChallenge?.tileIndex);
 
+  const isModalVisible = Boolean(
+    roomState &&
+      activeChallenge &&
+      activeChallenge.kind === 'question' &&
+      question &&
+      challengeModalReady &&
+      !isRollingAnimation &&
+      !isTokenMoving
+  );
+
   useEffect(() => {
-    if (!question || !activeChallenge) return;
+    if (!question || !activeChallenge || !isModalVisible) return;
     setSelected([]);
-    // Initialize ordering with a shuffled or shifted array so user orders it
     if (question.type === 'ordering') {
       const indices = question.options.map((_, idx) => idx);
-      // Shift by 1 so it starts out of order for the player to arrange
       if (indices.length > 1) {
         const first = indices.shift()!;
         indices.push(first);
@@ -59,10 +74,16 @@ export const QuestionModal: React.FC = () => {
       setOrderSequence(indices);
     }
     setSecondsLeft(question.timeSeconds);
-  }, [question?.id, activeChallenge?.startedAt]);
+  }, [question?.id, activeChallenge?.startedAt, isModalVisible]);
 
   useEffect(() => {
-    if (!question || !activeChallenge || activeChallenge.answered || roomState?.status === 'paused') {
+    if (
+      !isModalVisible ||
+      !question ||
+      !activeChallenge ||
+      activeChallenge.answered ||
+      roomState?.status === 'paused'
+    ) {
       return;
     }
 
@@ -78,13 +99,22 @@ export const QuestionModal: React.FC = () => {
       if (remaining === 0) {
         soundEngine.playSfx('time_up');
         clearInterval(timer);
+        // Auto-resolve on timeout so the player isn't stuck at 0s and sees the pedagogical explanation
+        submitAnswer([-1], false);
       }
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [question?.id, activeChallenge?.answered, activeChallenge?.expiresAt, roomState?.status]);
+  }, [
+    isModalVisible,
+    question?.id,
+    activeChallenge?.answered,
+    activeChallenge?.expiresAt,
+    roomState?.status,
+    submitAnswer,
+  ]);
 
-  if (!roomState || !activeChallenge || activeChallenge.kind !== 'question' || !question) {
+  if (!isModalVisible || !roomState || !activeChallenge || !question) {
     return null;
   }
 
@@ -128,7 +158,7 @@ export const QuestionModal: React.FC = () => {
   return (
     <div className="modal-backdrop question-backdrop" role="dialog" aria-modal="true">
       <div
-        className={`modal-card question-card-3d ${
+        className={`modal-card question-card-3d modal-animate-in ${
           isAnswered ? (isCorrect ? 'card-correct' : 'card-wrong') : ''
         }`}
       >
@@ -188,7 +218,7 @@ export const QuestionModal: React.FC = () => {
             <div className="q-ordering-list">
               <p className="q-helper-note">
                 Utiliza las flechas para ordenar la secuencia preventiva correcta de arriba a abajo
-                (o pulsa "Orden Óptimo Directo"):
+                (o pulsa "Colocar en orden normativo"):
               </p>
               {orderSequence.map((optIdx, posIdx) => (
                 <div key={optIdx} className="q-order-item">
@@ -252,9 +282,7 @@ export const QuestionModal: React.FC = () => {
                     onClick={() => handleToggleOption(idx)}
                     className={`q-option-btn ${statusClass}`}
                   >
-                    <span className="q-opt-letter">
-                      {String.fromCharCode(65 + idx)}
-                    </span>
+                    <span className="q-opt-letter">{String.fromCharCode(65 + idx)}</span>
                     <span className="q-opt-text">{optText}</span>
                   </button>
                 );
@@ -310,7 +338,6 @@ export const QuestionModal: React.FC = () => {
                 )}
               </div>
 
-              {/* Insignias desbloqueadas en este turno */}
               {activeChallenge.unlockedBadges && activeChallenge.unlockedBadges.length > 0 && (
                 <div className="unlocked-badges-alert">
                   <Award size={20} />
@@ -357,7 +384,7 @@ export const QuestionModal: React.FC = () => {
           )}
         </div>
 
-        {/* Pie de acciones */}
+        {/* Pie de acciones siempre visible */}
         <div className="q-footer-bar">
           {!isAnswered ? (
             <button

@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Html, OrbitControls, RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
@@ -19,6 +19,7 @@ const HotspotMarker3D: React.FC<{
   onToggle: () => void;
 }> = ({ hotspot, index, isSelected, revealed, onToggle }) => {
   const meshRef = useRef<THREE.Mesh>(null);
+  const [hovered, setHovered] = useState(false);
 
   useFrame(({ clock }) => {
     if (meshRef.current) {
@@ -37,7 +38,14 @@ const HotspotMarker3D: React.FC<{
     : '#38BDF8';
 
   return (
-    <group position={hotspot.position}>
+    <group
+      position={hotspot.position}
+      onPointerOver={(e) => {
+        e.stopPropagation();
+        setHovered(true);
+      }}
+      onPointerOut={() => setHovered(false)}
+    >
       {/* Objeto 3D interactivo en la posición del hotspot */}
       <mesh
         ref={meshRef}
@@ -63,17 +71,18 @@ const HotspotMarker3D: React.FC<{
         <meshStandardMaterial color="#334155" metalness={0.5} roughness={0.4} />
       </mesh>
 
-      {/* Etiqueta interactiva clicable en el visor 3D */}
-      <Html position={[0, 0.55, 0]} center distanceFactor={10}>
+      {/* Marcador numérico compacto (#1..#5) que no tapa el escenario 3D */}
+      <Html position={[0, 0.52, 0]} center zIndexRange={[10, 0]}>
         <button
           type="button"
           onClick={onToggle}
-          className={`hotspot-3d-chip ${isSelected ? 'selected' : ''} ${
+          title={hotspot.label}
+          className={`hotspot-3d-badge ${isSelected ? 'selected' : ''} ${
             revealed ? (hotspot.isCorrect ? 'correct' : 'wrong') : ''
           }`}
         >
-          <span className="hotspot-num">{index + 1}</span>
-          <span>{hotspot.label}</span>
+          <span>{index + 1}</span>
+          {hovered && <em className="hotspot-hover-text">{hotspot.label}</em>}
         </button>
       </Html>
     </group>
@@ -102,7 +111,7 @@ export const ChallengeScene3D: React.FC<ChallengeScene3DProps> = ({
           <meshStandardMaterial color="#0F172A" metalness={0.5} roughness={0.5} />
         </RoundedBox>
 
-        {/* Mobiliario / Maquinaria contextual según el tipo de desafío 3D */}
+        {/* Mobiliario / Maquinaria contextual del escenario 3D */}
         <RoundedBox args={[1.8, 1.0, 1.1]} radius={0.06} position={[-2.2, 0.5, -0.8]} castShadow>
           <meshStandardMaterial color="#334155" metalness={0.6} roughness={0.35} />
         </RoundedBox>

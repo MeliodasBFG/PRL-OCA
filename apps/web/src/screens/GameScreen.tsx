@@ -7,10 +7,12 @@ import {
   Info,
   PauseCircle,
   Play,
-  ShieldCheck,
+  RotateCcw,
   Sparkles,
   Trophy,
   Users,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import {
   BADGE_DEFINITIONS,
@@ -31,15 +33,26 @@ export const GameScreen: React.FC = () => {
   const {
     roomState,
     cameraView,
+    cameraResetKey,
+    cameraZoomDelta,
     graphicsQuality,
     board2DMode,
     reducedMotion,
     isRollingAnimation,
+    isTokenMoving,
+    challengeModalReady,
     isTeacher,
     projectorMode,
+    showTeacherPanel,
+    showQRModal,
+    showSettingsModal,
+    showInstructionsModal,
     errorMessage,
     rollDice,
     nextTurn,
+    resetCamera,
+    zoomCamera,
+    notifyTokenArrived,
     runTeacherCommand,
     clearError,
   } = useGameStore();
@@ -52,12 +65,24 @@ export const GameScreen: React.FC = () => {
   const activeTeam = roomState.teams[roomState.activeTeamIndex] ?? roomState.teams[0];
   const currentTile =
     BOARD_TILES.find((t) => t.index === activeTeam?.position) ?? BOARD_TILES[0];
-  const diceValues = roomState.lastDiceRoll?.dice ?? (roomState.config.diceMode === '2d6' ? [6, 6] : [6]);
+  const diceValues =
+    roomState.lastDiceRoll?.dice ?? (roomState.config.diceMode === '2d6' ? [6, 6] : [6]);
 
   const sortedStandings = [...roomState.teams].sort((a, b) => {
     if (b.position !== a.position) return b.position - a.position;
     return b.score - a.score;
   });
+
+  const anyModalOpen = Boolean(
+    (roomState.activeChallenge &&
+      challengeModalReady &&
+      !isRollingAnimation &&
+      !isTokenMoving) ||
+      showTeacherPanel ||
+      showQRModal ||
+      showSettingsModal ||
+      showInstructionsModal
+  );
 
   return (
     <main className="game-screen-layout">
@@ -76,9 +101,13 @@ export const GameScreen: React.FC = () => {
             diceValues={diceValues}
             isRolling={isRollingAnimation}
             cameraView={cameraView}
+            cameraResetKey={cameraResetKey}
+            cameraZoomDelta={cameraZoomDelta}
             graphicsQuality={graphicsQuality}
             reducedMotion={reducedMotion}
+            hideHtmlOverlays={anyModalOpen}
             onSelectTile={(tile) => setInspectedTile(tile)}
+            onActiveTokenArrive={notifyTokenArrived}
           />
         )}
 
@@ -112,6 +141,65 @@ export const GameScreen: React.FC = () => {
           </div>
         )}
 
+        {/* Controles flotantes de Zoom y Cámara para Móvil y Escritorio */}
+        {!board2DMode && (
+          <div className="viewport-camera-controls" aria-label="Controles rápidos de cámara 3D">
+            <button
+              type="button"
+              className="cam-ctrl-btn"
+              onClick={() => zoomCamera(1)}
+              title="Acercar cámara (Zoom +)"
+              aria-label="Acercar cámara"
+            >
+              <ZoomIn size={18} />
+            </button>
+            <button
+              type="button"
+              className="cam-ctrl-btn"
+              onClick={() => zoomCamera(-1)}
+              title="Alejar cámara (Zoom -)"
+              aria-label="Alejar cámara"
+            >
+              <ZoomOut size={18} />
+            </button>
+            <button
+              type="button"
+              className="cam-ctrl-btn"
+              onClick={resetCamera}
+              title="Recuperar perspectiva isométrica general"
+              aria-label="Recuperar perspectiva original"
+            >
+              <RotateCcw size={17} />
+            </button>
+          </div>
+        )}
+
+        {/* Banner Cinematográfico mientras los dados ruedan o la ficha avanza casilla por casilla */}
+        {(isRollingAnimation || isTokenMoving) && (
+          <div className="cinematic-movement-banner" role="status" aria-live="polite">
+            <div className="cinematic-spinner" />
+            <div>
+              {isRollingAnimation ? (
+                <>
+                  <strong>🎲 Lanzando dados 3D en el servidor...</strong>
+                  <span>Calculando puntuación autoritativa</span>
+                </>
+              ) : (
+                <>
+                  <strong>
+                    🎲 Resultado: {roomState.lastDiceRoll?.dice.join(' + ')} (
+                    {roomState.lastDiceRoll?.total}) · ¡Avanzando casilla por casilla!
+                  </strong>
+                  <span>
+                    {activeTeam?.name.split('(')[0].trim()} se desplaza hacia la casilla #
+                    {activeTeam?.position} ({currentTile.name})
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Aviso si la partida está en Pausa */}
         {roomState.status === 'paused' && (
           <div className="paused-overlay-banner">
@@ -139,26 +227,30 @@ export const GameScreen: React.FC = () => {
           </div>
         )}
 
-        {/* Tarjeta de Casilla Especial / Oca Preventiva cuando no hay pregunta abierta */}
-        {roomState.phase === 'showing_feedback' && !roomState.activeChallenge && (
-          <div className="special-tile-feedback-card">
-            <div className="special-card-head">
-              <Sparkles size={22} className="text-yellow" />
-              <h3>¡Casilla Especial Activada: {currentTile.name}!</h3>
+        {/* Tarjeta de Casilla Especial / Oca Preventiva una vez que la ficha ha llegado a destino */}
+        {roomState.phase === 'showing_feedback' &&
+          !roomState.activeChallenge &&
+          challengeModalReady &&
+          !isRollingAnimation &&
+          !isTokenMoving && (
+            <div className="special-tile-feedback-card modal-animate-in">
+              <div className="special-card-head">
+                <Sparkles size={22} className="text-yellow" />
+                <h3>¡Casilla Especial Activada: {currentTile.name}!</h3>
+              </div>
+              <p>
+                {roomState.lastDiceRoll?.specialExplanation ??
+                  currentTile.specialEffect?.explanation ??
+                  currentTile.subtitle}
+              </p>
+              <button type="button" className="btn-primary btn-lg" onClick={nextTurn}>
+                <FastForward size={18} /> Continuar Recorrido
+              </button>
             </div>
-            <p>
-              {roomState.lastDiceRoll?.specialExplanation ??
-                currentTile.specialEffect?.explanation ??
-                currentTile.subtitle}
-            </p>
-            <button type="button" className="btn-primary btn-lg" onClick={nextTurn}>
-              <FastForward size={18} /> Continuar Recorrido
-            </button>
-          </div>
-        )}
+          )}
 
         {/* Tarjeta flotante al pulsar cualquier casilla del tablero 3D/2D */}
-        {inspectedTile && (
+        {inspectedTile && !isRollingAnimation && !isTokenMoving && (
           <div className="tile-inspector-drawer" style={{ borderColor: inspectedTile.color }}>
             <div className="inspector-head">
               <span className="inspector-num" style={{ background: inspectedTile.color }}>
@@ -210,13 +302,19 @@ export const GameScreen: React.FC = () => {
                 <button
                   type="button"
                   className="btn-roll-dice-3d"
-                  disabled={isRollingAnimation || roomState.status !== 'playing'}
+                  disabled={
+                    isRollingAnimation || isTokenMoving || roomState.status !== 'playing'
+                  }
                   onClick={rollDice}
                 >
                   <Dices size={24} />
                   <div>
                     <strong>
-                      {isRollingAnimation ? 'LANZANDO DADOS 3D...' : 'LANZAR DADOS 3D'}
+                      {isRollingAnimation
+                        ? 'LANZANDO DADOS 3D...'
+                        : isTokenMoving
+                        ? 'AVANZANDO FICHA...'
+                        : 'LANZAR DADOS 3D'}
                     </strong>
                     <span>Turno de {activeTeam?.name.split('(')[0].trim()}</span>
                   </div>
@@ -229,7 +327,7 @@ export const GameScreen: React.FC = () => {
                 onClick={() => setMobilePanelOpen(!mobilePanelOpen)}
               >
                 <Trophy size={18} />
-                <span>{mobilePanelOpen ? 'Ocultar Panel' : 'Clasificación'}</span>
+                <span>{mobilePanelOpen ? 'Ocultar' : 'Clasificación'}</span>
               </button>
             </div>
           )}
@@ -315,8 +413,8 @@ export const GameScreen: React.FC = () => {
         <div className="sidebar-footer-tip">
           <Info size={14} />
           <span>
-            Pulsa cualquier casilla 3D para consultar su categoría PRL o usa la rueda/pellizco
-            para acercar la cámara.
+            Pulsa cualquier casilla 3D para consultar su categoría PRL o usa los controles de
+            zoom/rotación para explorar el tablero.
           </span>
         </div>
       </aside>

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Html, RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
@@ -8,7 +8,61 @@ interface Tile3DProps {
   tile: TileDefinition;
   isOccupied: boolean;
   isActiveTile: boolean;
+  hideHtmlOverlays?: boolean;
   onSelectTile?: (tile: TileDefinition) => void;
+}
+
+/**
+ * Generates a crisp 3D CanvasTexture painted directly onto the top face of the tile
+ * so tile numbers (#1..#48) and short names are part of the 3D board surface itself
+ * and never cover or block the board with floating DOM elements.
+ */
+function createTileTopTexture(tile: TileDefinition): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    // Background fill
+    ctx.fillStyle = tile.color;
+    ctx.fillRect(0, 0, 256, 256);
+
+    // Inner industrial border frame
+    ctx.strokeStyle = tile.accentColor;
+    ctx.lineWidth = 10;
+    ctx.strokeRect(12, 12, 232, 232);
+
+    // Top-left corner badge for Tile Number
+    ctx.fillStyle = 'rgba(15, 20, 28, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(22, 22, 92, 52, 10);
+    ctx.fill();
+    ctx.strokeStyle = tile.accentColor;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '900 32px Inter, Segoe UI, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`#${tile.index}`, 68, 49);
+
+    // Bottom label strip with short tile name
+    ctx.fillStyle = 'rgba(15, 20, 28, 0.84)';
+    ctx.fillRect(18, 186, 220, 52);
+
+    ctx.fillStyle = '#F8FAFC';
+    ctx.font = 'bold 20px Inter, Segoe UI, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const shortName =
+      tile.name.length > 18 ? `${tile.name.slice(0, 17).trim()}…` : tile.name;
+    ctx.fillText(shortName, 128, 212);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
 }
 
 const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> = ({
@@ -22,7 +76,7 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
       return (
         <group>
           <mesh castShadow>
-            <cylinderGeometry args={[0.32, 0.28, 0.1, 6]} />
+            <cylinderGeometry args={[0.26, 0.22, 0.08, 6]} />
             <meshStandardMaterial
               color="#10B981"
               emissive="#10B981"
@@ -31,8 +85,8 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
               roughness={0.2}
             />
           </mesh>
-          <mesh position={[0, 0.08, 0]}>
-            <octahedronGeometry args={[0.16, 0]} />
+          <mesh position={[0, 0.07, 0]}>
+            <octahedronGeometry args={[0.13, 0]} />
             <meshStandardMaterial color="#FEF08A" metalness={0.8} roughness={0.15} />
           </mesh>
         </group>
@@ -45,11 +99,11 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
       return (
         <group>
           <mesh castShadow>
-            <sphereGeometry args={[0.26, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.55]} />
+            <sphereGeometry args={[0.22, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.55]} />
             <meshStandardMaterial color="#FFB800" metalness={0.3} roughness={0.25} />
           </mesh>
-          <mesh position={[0, 0.01, 0.16]}>
-            <boxGeometry args={[0.34, 0.04, 0.16]} />
+          <mesh position={[0, 0.01, 0.14]}>
+            <boxGeometry args={[0.28, 0.035, 0.14]} />
             <meshStandardMaterial color="#F59E0B" />
           </mesh>
         </group>
@@ -58,11 +112,11 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
       return (
         <group>
           <mesh castShadow>
-            <cylinderGeometry args={[0.14, 0.14, 0.42, 16]} />
+            <cylinderGeometry args={[0.11, 0.11, 0.34, 16]} />
             <meshStandardMaterial color="#EF4444" metalness={0.4} roughness={0.3} />
           </mesh>
-          <mesh position={[0, 0.25, 0]}>
-            <cylinderGeometry args={[0.05, 0.05, 0.1, 12]} />
+          <mesh position={[0, 0.2, 0]}>
+            <cylinderGeometry args={[0.04, 0.04, 0.08, 12]} />
             <meshStandardMaterial color="#1E293B" metalness={0.8} />
           </mesh>
         </group>
@@ -72,7 +126,7 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
     case 'alert':
       return (
         <mesh castShadow>
-          <coneGeometry args={[0.28, 0.38, 3]} />
+          <coneGeometry args={[0.22, 0.32, 3]} />
           <meshStandardMaterial
             color="#FFB800"
             emissive="#F59E0B"
@@ -85,7 +139,7 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
     case 'bolt':
       return (
         <mesh castShadow rotation={[0, 0, -0.3]}>
-          <octahedronGeometry args={[0.26, 0]} />
+          <octahedronGeometry args={[0.21, 0]} />
           <meshStandardMaterial
             color="#FDE047"
             emissive="#FACC15"
@@ -101,11 +155,11 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
       return (
         <group>
           <mesh castShadow>
-            <boxGeometry args={[0.36, 0.12, 0.12]} />
+            <boxGeometry args={[0.3, 0.1, 0.1]} />
             <meshStandardMaterial color="#10B981" emissive="#10B981" emissiveIntensity={0.35} />
           </mesh>
           <mesh castShadow>
-            <boxGeometry args={[0.12, 0.36, 0.12]} />
+            <boxGeometry args={[0.1, 0.3, 0.1]} />
             <meshStandardMaterial color="#10B981" emissive="#10B981" emissiveIntensity={0.35} />
           </mesh>
         </group>
@@ -113,8 +167,8 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
     case 'trophy':
       return (
         <group>
-          <mesh position={[0, 0.2, 0]} castShadow>
-            <cylinderGeometry args={[0.34, 0.16, 0.45, 20]} />
+          <mesh position={[0, 0.18, 0]} castShadow>
+            <cylinderGeometry args={[0.3, 0.14, 0.4, 20]} />
             <meshStandardMaterial
               color="#FFB800"
               emissive="#F59E0B"
@@ -123,8 +177,8 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
               roughness={0.12}
             />
           </mesh>
-          <mesh position={[0, -0.05, 0]}>
-            <cylinderGeometry args={[0.26, 0.3, 0.12, 20]} />
+          <mesh position={[0, -0.04, 0]}>
+            <cylinderGeometry args={[0.22, 0.26, 0.1, 20]} />
             <meshStandardMaterial color="#1E293B" metalness={0.6} roughness={0.3} />
           </mesh>
         </group>
@@ -132,7 +186,7 @@ const TileIcon3D: React.FC<{ iconType: string; color: string; accent: string }> 
     default:
       return (
         <mesh castShadow>
-          <dodecahedronGeometry args={[0.24, 0]} />
+          <dodecahedronGeometry args={[0.19, 0]} />
           <meshStandardMaterial
             color={accent || color}
             emissive={color}
@@ -149,11 +203,14 @@ export const Tile3D: React.FC<Tile3DProps> = ({
   tile,
   isOccupied,
   isActiveTile,
+  hideHtmlOverlays = false,
   onSelectTile,
 }) => {
   const [hovered, setHovered] = useState(false);
   const iconGroupRef = useRef<THREE.Group>(null);
   const ringRef = useRef<THREE.Mesh>(null);
+
+  const topTexture = useMemo(() => createTileTopTexture(tile), [tile]);
 
   const isSpecial =
     tile.type === 'prevencion' ||
@@ -166,16 +223,16 @@ export const Tile3D: React.FC<Tile3DProps> = ({
     if (iconGroupRef.current) {
       iconGroupRef.current.rotation.y = t * 0.9 + tile.index * 0.2;
       iconGroupRef.current.position.y =
-        0.34 + Math.sin(t * 2.2 + tile.index * 0.4) * (isActiveTile ? 0.09 : 0.04);
+        0.28 + Math.sin(t * 2.2 + tile.index * 0.4) * (isActiveTile ? 0.08 : 0.03);
     }
     if (ringRef.current) {
-      const scale = isActiveTile || hovered ? 1.08 + Math.sin(t * 5) * 0.05 : 1;
+      const scale = isActiveTile || hovered ? 1.06 + Math.sin(t * 5) * 0.04 : 1;
       ringRef.current.scale.set(scale, scale, 1);
     }
   });
 
-  const baseSize = tile.type === 'meta' ? 3.2 : 2.35;
-  const baseHeight = tile.type === 'meta' ? 0.55 : isSpecial ? 0.38 : 0.28;
+  const baseSize = tile.type === 'meta' ? 3.1 : 2.3;
+  const baseHeight = tile.type === 'meta' ? 0.52 : isSpecial ? 0.36 : 0.26;
 
   return (
     <group
@@ -193,7 +250,7 @@ export const Tile3D: React.FC<Tile3DProps> = ({
       {/* Base biselada 3D de la casilla */}
       <RoundedBox
         args={[baseSize, baseHeight, baseSize]}
-        radius={0.1}
+        radius={0.09}
         smoothness={3}
         receiveShadow
         castShadow
@@ -207,67 +264,55 @@ export const Tile3D: React.FC<Tile3DProps> = ({
         />
       </RoundedBox>
 
-      {/* Plataforma superior coloreada en relieve */}
-      <RoundedBox
-        args={[baseSize * 0.86, 0.08, baseSize * 0.86]}
-        radius={0.04}
-        position={[0, baseHeight / 2 + 0.03, 0]}
+      {/* Superficie superior con textura 3D integrada (número + nombre sin tapar el tablero) */}
+      <mesh
+        position={[0, baseHeight / 2 + 0.015, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
         receiveShadow
       >
+        <planeGeometry args={[baseSize * 0.88, baseSize * 0.88]} />
         <meshStandardMaterial
-          color={tile.color}
-          metalness={0.35}
-          roughness={0.28}
+          map={topTexture}
+          metalness={0.18}
+          roughness={0.35}
           emissive={tile.color}
-          emissiveIntensity={isActiveTile || hovered ? 0.45 : 0.15}
-        />
-      </RoundedBox>
-
-      {/* Anillo luminoso perimetral para casillas activas o especiales */}
-      <mesh
-        ref={ringRef}
-        position={[0, baseHeight / 2 + 0.08, 0]}
-        rotation={[-Math.PI / 2, 0, 0]}
-      >
-        <ringGeometry args={[baseSize * 0.36, baseSize * 0.43, 24]} />
-        <meshStandardMaterial
-          color={tile.accentColor}
-          emissive={tile.accentColor}
-          emissiveIntensity={isActiveTile ? 1.1 : isSpecial ? 0.6 : 0.25}
-          side={THREE.DoubleSide}
+          emissiveIntensity={isActiveTile || hovered ? 0.22 : 0.04}
         />
       </mesh>
 
+      {/* Anillo luminoso perimetral para casilla activa o especial */}
+      {(isActiveTile || hovered || isSpecial) && (
+        <mesh
+          ref={ringRef}
+          position={[0, baseHeight / 2 + 0.025, 0]}
+          rotation={[-Math.PI / 2, 0, 0]}
+        >
+          <ringGeometry args={[baseSize * 0.42, baseSize * 0.47, 28]} />
+          <meshStandardMaterial
+            color={tile.accentColor}
+            emissive={tile.accentColor}
+            emissiveIntensity={isActiveTile ? 1.1 : hovered ? 0.8 : 0.4}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
+
       {/* Icono 3D flotante de la categoría / tipo de casilla */}
-      <group ref={iconGroupRef} position={[0, baseHeight / 2 + 0.34, 0]}>
+      <group ref={iconGroupRef} position={[0, baseHeight / 2 + 0.28, -0.15]}>
         <TileIcon3D iconType={tile.icon3D} color={tile.color} accent={tile.accentColor} />
       </group>
 
-      {/* Numeración visible y etiqueta en hover / casilla especial */}
-      <Html
-        position={[0, baseHeight / 2 + 0.12, baseSize * 0.38]}
-        center
-        distanceFactor={26}
-        zIndexRange={[5, 0]}
-      >
-        <div
-          style={{
-            background: isActiveTile ? '#FFB800' : 'rgba(15, 23, 42, 0.88)',
-            color: isActiveTile ? '#0F141C' : '#F8FAFC',
-            border: `1.5px solid ${tile.accentColor}`,
-            borderRadius: '6px',
-            padding: '1px 6px',
-            fontSize: '11px',
-            fontWeight: 900,
-            letterSpacing: '0.02em',
-            pointerEvents: 'none',
-            whiteSpace: 'nowrap',
-            boxShadow: isActiveTile ? '0 0 12px rgba(255,184,0,0.8)' : 'none',
-          }}
-        >
-          #{tile.index} {isSpecial || hovered || isActiveTile ? `· ${tile.name}` : ''}
-        </div>
-      </Html>
+      {/* Tooltip flotante compacto ÚNICAMENTE al pasar el ratón por encima */}
+      {!hideHtmlOverlays && hovered && (
+        <Html position={[0, baseHeight / 2 + 0.85, 0]} center zIndexRange={[10, 0]}>
+          <div className="tile-hover-tooltip">
+            <strong>
+              #{tile.index} · {tile.name}
+            </strong>
+            <span>{tile.subtitle}</span>
+          </div>
+        </Html>
+      )}
     </group>
   );
 };

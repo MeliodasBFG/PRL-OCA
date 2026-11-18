@@ -12,7 +12,14 @@ import { ChallengeScene3D } from '../scenes/ChallengeScene3D';
 import { soundEngine } from '../audio/SoundEngine';
 
 export const ChallengeModal: React.FC = () => {
-  const { roomState, completeChallenge3D, nextTurn } = useGameStore();
+  const {
+    roomState,
+    isRollingAnimation,
+    isTokenMoving,
+    challengeModalReady,
+    completeChallenge3D,
+    nextTurn,
+  } = useGameStore();
   const activeChallenge = roomState?.activeChallenge;
   const challenge =
     activeChallenge?.kind === 'challenge3d' ? activeChallenge.challenge3d : undefined;
@@ -20,24 +27,53 @@ export const ChallengeModal: React.FC = () => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [secondsLeft, setSecondsLeft] = useState<number>(90);
 
-  useEffect(() => {
-    if (!challenge || !activeChallenge) return;
-    setSelectedIds([]);
-    setSecondsLeft(challenge.timeSeconds);
-  }, [challenge?.id, activeChallenge?.startedAt]);
+  const isModalVisible = Boolean(
+    roomState &&
+      activeChallenge &&
+      activeChallenge.kind === 'challenge3d' &&
+      challenge &&
+      challengeModalReady &&
+      !isRollingAnimation &&
+      !isTokenMoving
+  );
 
   useEffect(() => {
-    if (!challenge || !activeChallenge || activeChallenge.answered || roomState?.status === 'paused') {
+    if (!challenge || !activeChallenge || !isModalVisible) return;
+    setSelectedIds([]);
+    setSecondsLeft(challenge.timeSeconds);
+  }, [challenge?.id, activeChallenge?.startedAt, isModalVisible]);
+
+  useEffect(() => {
+    if (
+      !isModalVisible ||
+      !challenge ||
+      !activeChallenge ||
+      activeChallenge.answered ||
+      roomState?.status === 'paused'
+    ) {
       return;
     }
     const timer = setInterval(() => {
       const rem = Math.max(0, Math.ceil((activeChallenge.expiresAt - Date.now()) / 1000));
       setSecondsLeft(rem);
+      if (rem === 0) {
+        soundEngine.playSfx('time_up');
+        clearInterval(timer);
+        completeChallenge3D(selectedIds.length > 0 ? selectedIds : ['timeout']);
+      }
     }, 1000);
     return () => clearInterval(timer);
-  }, [challenge?.id, activeChallenge?.answered, activeChallenge?.expiresAt, roomState?.status]);
+  }, [
+    isModalVisible,
+    challenge?.id,
+    activeChallenge?.answered,
+    activeChallenge?.expiresAt,
+    roomState?.status,
+    selectedIds,
+    completeChallenge3D,
+  ]);
 
-  if (!roomState || !activeChallenge || activeChallenge.kind !== 'challenge3d' || !challenge) {
+  if (!isModalVisible || !roomState || !activeChallenge || !challenge) {
     return null;
   }
 
@@ -54,7 +90,7 @@ export const ChallengeModal: React.FC = () => {
 
   return (
     <div className="modal-backdrop question-backdrop" role="dialog" aria-modal="true">
-      <div className="modal-card challenge-modal-card">
+      <div className="modal-card challenge-modal-card modal-animate-in">
         <div className="q-header-strip">
           <div className="q-badges-row">
             <span className="q-chip-tile" style={{ background: '#7C3AED' }}>
@@ -69,7 +105,6 @@ export const ChallengeModal: React.FC = () => {
         </div>
 
         <div className="challenge-modal-grid">
-          {/* Visor 3D interactivo a la izquierda */}
           <div className="challenge-left-col">
             <ChallengeScene3D
               challenge={challenge}
@@ -78,12 +113,11 @@ export const ChallengeModal: React.FC = () => {
               onToggleHotspot={toggleHotspot}
             />
             <p className="challenge-viewport-caption">
-              Puedes rotar la cámara 3D con el ratón o el dedo y pulsar directamente sobre los
-              objetos 3D o sus etiquetas.
+              Rota la cámara 3D y pulsa sobre los marcadores numerados (1–5) o selecciónalos en la
+              lista adjunta.
             </p>
           </div>
 
-          {/* Panel de inspección y validación a la derecha */}
           <div className="challenge-right-col">
             <h2>{challenge.title}</h2>
             <p className="challenge-instructions">{challenge.instructions}</p>

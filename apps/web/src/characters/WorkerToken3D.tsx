@@ -11,12 +11,19 @@ interface WorkerToken3DProps {
   totalTeams: number;
   isActiveTurn: boolean;
   reducedMotion?: boolean;
+  hideHtmlOverlays?: boolean;
+  onActiveTokenProgress?: (
+    worldPos: [number, number, number],
+    currentTileIndex: number,
+    isWalking: boolean
+  ) => void;
+  onActiveTokenArrive?: () => void;
 }
 
 /**
  * Ficha 3D animada de cada equipo: trabajador con casco de seguridad,
  * uniforme del color del equipo, tiras reflectantes, botas S3 y desplazamiento
- * casilla por casilla (nunca se teletransporta directamente).
+ * casilla por casilla a ritmo cinematográfico (~0.52s por casilla).
  */
 export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
   team,
@@ -24,6 +31,9 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
   totalTeams,
   isActiveTurn,
   reducedMotion = false,
+  hideHtmlOverlays = false,
+  onActiveTokenProgress,
+  onActiveTokenArrive,
 }) => {
   const groupRef = useRef<THREE.Group>(null);
   const leftLegRef = useRef<THREE.Mesh>(null);
@@ -31,15 +41,13 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
   const leftArmRef = useRef<THREE.Mesh>(null);
   const rightArmRef = useRef<THREE.Mesh>(null);
 
-  // Track visual tile index so token walks step-by-step from previous tile to target tile
   const [visualTileIndex, setVisualTileIndex] = useState<number>(team.position);
   const [nextStepTileIndex, setNextStepTileIndex] = useState<number>(team.position);
   const stepProgressRef = useRef<number>(1);
   const isWalkingRef = useRef<boolean>(false);
 
-  // Calculate small radial offset so multiple tokens on the same tile don't overlap
   const angle = (teamIndex / Math.max(1, totalTeams)) * Math.PI * 2;
-  const offsetRadius = totalTeams > 1 ? 0.52 : 0;
+  const offsetRadius = totalTeams > 1 ? 0.48 : 0;
   const offsetX = Math.cos(angle) * offsetRadius;
   const offsetZ = Math.sin(angle) * offsetRadius;
 
@@ -49,6 +57,9 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
         setVisualTileIndex(team.position);
         setNextStepTileIndex(team.position);
         stepProgressRef.current = 1;
+        if (isActiveTurn) {
+          onActiveTokenArrive?.();
+        }
         return;
       }
       isWalkingRef.current = true;
@@ -56,7 +67,7 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
       const dir = team.position > visualTileIndex ? 1 : -1;
       setNextStepTileIndex(visualTileIndex + dir);
     }
-  }, [team.position, visualTileIndex, reducedMotion]);
+  }, [team.position, visualTileIndex, reducedMotion, isActiveTurn, onActiveTokenArrive]);
 
   useFrame(({ clock }, delta) => {
     if (!groupRef.current) return;
@@ -68,31 +79,45 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
       BOARD_TILES.find((tile) => tile.index === nextStepTileIndex) ?? currentTile;
 
     if (isWalkingRef.current) {
-      stepProgressRef.current += delta * 4.2; // ~0.24s per tile hop
-      const p = Math.min(1, stepProgressRef.current);
+      // Smooth, readable step speed: ~0.52 seconds per tile hop
+      stepProgressRef.current += Math.min(delta, 0.05) * 1.9;
+      const rawP = Math.min(1, stepProgressRef.current);
+      // Smoothstep easing so each hop accelerates and decelerates naturally
+      const p = rawP * rawP * (3 - 2 * rawP);
 
-      const x = THREE.MathUtils.lerp(currentTile.position[0], targetStepTile.position[0], p) + offsetX;
-      const z = THREE.MathUtils.lerp(currentTile.position[2], targetStepTile.position[2], p) + offsetZ;
+      const x =
+        THREE.MathUtils.lerp(currentTile.position[0], targetStepTile.position[0], p) + offsetX;
+      const z =
+        THREE.MathUtils.lerp(currentTile.position[2], targetStepTile.position[2], p) + offsetZ;
       const baseY = THREE.MathUtils.lerp(currentTile.position[1], targetStepTile.position[1], p);
-      const jumpArc = Math.sin(p * Math.PI) * 0.65;
+      const jumpArc = Math.sin(rawP * Math.PI) * 0.72;
 
       groupRef.current.position.set(x, baseY + 0.35 + jumpArc, z);
+
+      if (isActiveTurn) {
+        onActiveTokenProgress?.([x, baseY + 0.35, z], nextStepTileIndex, true);
+      }
 
       // Face movement direction
       const dx = targetStepTile.position[0] - currentTile.position[0];
       const dz = targetStepTile.position[2] - currentTile.position[2];
       if (Math.abs(dx) + Math.abs(dz) > 0.01) {
-        groupRef.current.rotation.y = Math.atan2(dx, dz);
+        const targetAngle = Math.atan2(dx, dz);
+        groupRef.current.rotation.y = THREE.MathUtils.lerp(
+          groupRef.current.rotation.y,
+          targetAngle,
+          0.25
+        );
       }
 
       // Swing legs & arms while walking
-      const swing = Math.sin(p * Math.PI * 2) * 0.6;
+      const swing = Math.sin(rawP * Math.PI * 2) * 0.65;
       if (leftLegRef.current) leftLegRef.current.rotation.x = swing;
       if (rightLegRef.current) rightLegRef.current.rotation.x = -swing;
       if (leftArmRef.current) leftArmRef.current.rotation.x = -swing;
       if (rightArmRef.current) rightArmRef.current.rotation.x = swing;
 
-      if (p >= 1) {
+      if (rawP >= 1) {
         soundEngine.playSfx('token_step');
         if (nextStepTileIndex !== team.position) {
           const dir = team.position > nextStepTileIndex ? 1 : -1;
@@ -106,17 +131,30 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
           if (rightLegRef.current) rightLegRef.current.rotation.x = 0;
           if (leftArmRef.current) leftArmRef.current.rotation.x = 0;
           if (rightArmRef.current) rightArmRef.current.rotation.x = 0;
+          soundEngine.playSfx('tile_arrive');
+          if (isActiveTurn) {
+            onActiveTokenProgress?.(
+              [
+                targetStepTile.position[0] + offsetX,
+                targetStepTile.position[1] + 0.35,
+                targetStepTile.position[2] + offsetZ,
+              ],
+              team.position,
+              false
+            );
+            onActiveTokenArrive?.();
+          }
         }
       }
     } else {
-      const idleBounce = isActiveTurn && !reducedMotion ? Math.abs(Math.sin(t * 3.5)) * 0.14 : 0;
+      const idleBounce = isActiveTurn && !reducedMotion ? Math.abs(Math.sin(t * 3.0)) * 0.12 : 0;
       groupRef.current.position.set(
         currentTile.position[0] + offsetX,
         currentTile.position[1] + 0.35 + idleBounce,
         currentTile.position[2] + offsetZ
       );
       if (isActiveTurn && !reducedMotion) {
-        groupRef.current.rotation.y = Math.sin(t * 1.5) * 0.35;
+        groupRef.current.rotation.y = Math.sin(t * 1.4) * 0.3;
       }
     }
   });
@@ -131,7 +169,7 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
           metalness={0.5}
           roughness={0.25}
           emissive={team.hexColor}
-          emissiveIntensity={isActiveTurn ? 0.65 : 0.18}
+          emissiveIntensity={isActiveTurn ? 0.75 : 0.2}
         />
       </mesh>
 
@@ -202,25 +240,20 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
         </mesh>
       </group>
 
-      {/* Etiqueta flotante del equipo */}
-      <Html position={[0, 1.48, 0]} center distanceFactor={22} zIndexRange={[10, 0]}>
-        <div
-          style={{
-            background: isActiveTurn ? team.hexColor : 'rgba(15, 20, 28, 0.88)',
-            color: '#FFFFFF',
-            border: `2px solid ${team.hexColor}`,
-            borderRadius: '999px',
-            padding: '2px 8px',
-            fontSize: '11px',
-            fontWeight: 800,
-            whiteSpace: 'nowrap',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.45)',
-            pointerEvents: 'none',
-          }}
-        >
-          {team.name.split('(')[0].trim()} · #{team.position}
-        </div>
-      </Html>
+      {/* Etiqueta compacta solo para la ficha con el turno activo y cuando no hay modales abiertos */}
+      {!hideHtmlOverlays && isActiveTurn && (
+        <Html position={[0, 1.48, 0]} center zIndexRange={[8, 0]}>
+          <div
+            className="active-token-pill"
+            style={{
+              background: team.hexColor,
+              borderColor: '#FFFFFF',
+            }}
+          >
+            {team.name.split('(')[0].trim()} · #{visualTileIndex}
+          </div>
+        </Html>
+      )}
     </group>
   );
 };
