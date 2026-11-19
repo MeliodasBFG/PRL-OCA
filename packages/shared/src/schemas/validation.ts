@@ -62,6 +62,7 @@ export const GameConfigSchema = z.object({
   maxPlayers: z.number().int().min(2).max(15).default(15),
   diceMode: z.enum(['1d6', '2d6']).default('1d6'),
   difficultyFilter: z.enum(['facil', 'intermedio', 'avanzado', 'todas']).default('todas'),
+  wrongAnswerPenalty: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(0),
   enabledCategories: z.array(PRLCategorySchema).min(1),
   timers: z.object({
     facil: z.number().int().min(10).max(180).default(30),

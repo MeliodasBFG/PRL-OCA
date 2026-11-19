@@ -103,4 +103,45 @@ describe('PRL-OCA 3D - Tablero de 48 Casillas, Contenidos y Motor Autoritativo',
     });
     expect(state.teams[0].score).toBeGreaterThanOrEqual(90);
   });
+
+  it('aplica la penalización configurable al fallar una pregunta (0, 1 o 2 casillas de retroceso)', () => {
+    // 1. Modo "No pasa nada" (0)
+    const state0 = createInitialRoomState('PEN0', { wrongAnswerPenalty: 0 });
+    joinPlayerToState(state0, { playerId: 'p1', playerName: 'Ana', preferredTeamId: 'team_1' });
+    state0.status = 'playing';
+    rollDiceServerSide(state0, 'p1', INITIAL_QUESTION_BANK, () => 3); // Tile 1 -> Tile 4
+    expect(state0.teams[0].position).toBe(4);
+    const q0 = state0.activeChallenge!.question!;
+    const wrongIdx0 = q0.options.findIndex((_, i) => !q0.correctIndices.includes(i));
+    submitAnswerServerSide(state0, 'p1', [wrongIdx0], false);
+    expect(state0.teams[0].position).toBe(4);
+    expect(state0.activeChallenge?.retreatTiles).toBe(0);
+
+    // 2. Modo "Retrocede 1 casilla" (1)
+    const state1 = createInitialRoomState('PEN1', { wrongAnswerPenalty: 1 });
+    joinPlayerToState(state1, { playerId: 'p1', playerName: 'Ana', preferredTeamId: 'team_1' });
+    state1.status = 'playing';
+    rollDiceServerSide(state1, 'p1', INITIAL_QUESTION_BANK, () => 3); // Tile 1 -> Tile 4
+    const q1 = state1.activeChallenge!.question!;
+    const wrongIdx1 = q1.options.findIndex((_, i) => !q1.correctIndices.includes(i));
+    submitAnswerServerSide(state1, 'p1', [wrongIdx1], false);
+    expect(state1.teams[0].position).toBe(3);
+    expect(state1.activeChallenge?.retreatTiles).toBe(1);
+
+    // 3. Modo "Retrocede 2 casillas" (2), configurable también en vivo desde el Panel Docente
+    const state2 = createInitialRoomState('PEN2', { wrongAnswerPenalty: 0 });
+    joinPlayerToState(state2, { playerId: 'p1', playerName: 'Ana', preferredTeamId: 'team_1' });
+    state2.status = 'playing';
+    executeTeacherCommandServerSide(state2, {
+      kind: 'UPDATE_CONFIG',
+      partialConfig: { wrongAnswerPenalty: 2 },
+    });
+    expect(state2.config.wrongAnswerPenalty).toBe(2);
+    rollDiceServerSide(state2, 'p1', INITIAL_QUESTION_BANK, () => 3); // Tile 1 -> Tile 4
+    const q2 = state2.activeChallenge!.question!;
+    const wrongIdx2 = q2.options.findIndex((_, i) => !q2.correctIndices.includes(i));
+    submitAnswerServerSide(state2, 'p1', [wrongIdx2], false);
+    expect(state2.teams[0].position).toBe(2);
+    expect(state2.activeChallenge?.retreatTiles).toBe(2);
+  });
 });

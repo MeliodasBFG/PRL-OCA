@@ -46,6 +46,8 @@ export type IndustrialZone =
 
 export type Difficulty = 'facil' | 'intermedio' | 'avanzado';
 
+export type WrongAnswerPenalty = 0 | 1 | 2;
+
 export type QuestionType =
   | 'test'
   | 'true_false'
@@ -222,6 +224,7 @@ export interface GameConfig {
   maxPlayers: number; // 2 to 15
   diceMode: '1d6' | '2d6';
   difficultyFilter: Difficulty | 'todas';
+  wrongAnswerPenalty: WrongAnswerPenalty;
   enabledCategories: PRLCategory[];
   timers: {
     facil: number;
@@ -251,6 +254,7 @@ export interface ActiveTurnChallenge {
   selectedIndices?: number[];
   isCorrect?: boolean;
   pointsAwarded?: number;
+  retreatTiles?: number;
   collaborationBonusAwarded?: boolean;
   unlockedBadges?: BadgeId[];
 }

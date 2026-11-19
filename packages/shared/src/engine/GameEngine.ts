@@ -568,6 +568,8 @@ export function submitAnswerServerSide(
   ).length;
   const giveCollabBonus = collaborated && teamMembersCount > 1;
 
+  let retreatTiles = 0;
+
   if (isCorrect) {
     pointsAwarded = q.points + (giveCollabBonus ? state.config.scoring.colaboracionBonus : 0);
     activeTeam.score += pointsAwarded;
@@ -611,14 +613,28 @@ export function submitAnswerServerSide(
   } else {
     activeTeam.wrongAnswers += 1;
     activeTeam.streak = 0;
+    const prevPos = activeTeam.position;
+    const penalty = state.config.wrongAnswerPenalty ?? 0;
+
     // If on tile 48 and failed the final question, step back to tile 46 to reinforce
-    if (activeTeam.position === 48) {
+    if (prevPos === 48) {
+      activeTeam.previousPosition = prevPos;
       activeTeam.position = 46;
+      retreatTiles = prevPos - activeTeam.position;
+    } else if (penalty > 0) {
+      activeTeam.previousPosition = prevPos;
+      activeTeam.position = Math.max(1, prevPos - penalty);
+      retreatTiles = prevPos - activeTeam.position;
     }
+
     state.logs.unshift(
       createLog(
         'answer',
-        `Respuesta incorrecta de ${activeTeam.name} en "${q.title}". Se muestra explicación pedagógica.`,
+        retreatTiles > 0
+          ? `Respuesta incorrecta de ${activeTeam.name} en "${q.title}". Retrocede ${retreatTiles} ${
+              retreatTiles === 1 ? 'casilla' : 'casillas'
+            } hasta la #${activeTeam.position}.`
+          : `Respuesta incorrecta de ${activeTeam.name} en "${q.title}". Se muestra explicación pedagógica.`,
         activeTeam.id
       )
     );
@@ -628,6 +644,7 @@ export function submitAnswerServerSide(
   state.activeChallenge.selectedIndices = selectedIndices;
   state.activeChallenge.isCorrect = isCorrect;
   state.activeChallenge.pointsAwarded = pointsAwarded;
+  state.activeChallenge.retreatTiles = retreatTiles;
   state.activeChallenge.collaborationBonusAwarded = isCorrect && giveCollabBonus;
   state.activeChallenge.unlockedBadges = unlockedBadges;
 
@@ -692,6 +709,8 @@ export function completeChallenge3DServerSide(
 
   let pointsAwarded = 0;
   let unlockedBadges: BadgeId[] = [];
+
+  let retreatTiles = 0;
 
   if (isCorrect) {
     pointsAwarded = challenge.points + state.config.scoring.colaboracionBonus;

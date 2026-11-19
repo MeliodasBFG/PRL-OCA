@@ -330,9 +330,18 @@ export const QuestionModal: React.FC = () => {
                     <XCircle size={24} className="text-orange" />
                     <div>
                       <h3>ATENCIÓN PREVENTIVA: Revisemos la solución correcta</h3>
-                      <span>
-                        Se ha iluminado en verde la actuación segura para consolidar el aprendizaje.
-                      </span>
+                      {(activeChallenge.retreatTiles ?? 0) > 0 ? (
+                        <span className="text-orange" style={{ fontWeight: 800 }}>
+                          ⚠️ Penalización: el equipo retrocede {activeChallenge.retreatTiles}{' '}
+                          {activeChallenge.retreatTiles === 1 ? 'casilla' : 'casillas'} (hasta la #
+                          {activeTeam?.position}). Se muestra la actuación segura en verde.
+                        </span>
+                      ) : (
+                        <span>
+                          Sin retroceso de casilla. Se ha iluminado en verde la actuación segura
+                          para consolidar el aprendizaje.
+                        </span>
+                      )}
                     </div>
                   </>
                 )}

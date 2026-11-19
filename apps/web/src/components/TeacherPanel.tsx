@@ -12,7 +12,7 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import { BOARD_TILES, CHALLENGES_3D, Difficulty } from '@prl-oca/shared';
+import { BOARD_TILES, CHALLENGES_3D, Difficulty, WrongAnswerPenalty } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 
 export const TeacherPanel: React.FC = () => {
@@ -307,6 +307,25 @@ export const TeacherPanel: React.FC = () => {
                   <option value="facil">Solo Nivel Fácil</option>
                   <option value="intermedio">Solo Nivel Intermedio</option>
                   <option value="avanzado">Solo Nivel Avanzado</option>
+                </select>
+              </label>
+
+              <label>
+                Si se falla una pregunta:
+                <select
+                  value={roomState.config.wrongAnswerPenalty ?? 0}
+                  onChange={(e) =>
+                    runTeacherCommand({
+                      kind: 'UPDATE_CONFIG',
+                      partialConfig: {
+                        wrongAnswerPenalty: Number(e.target.value) as WrongAnswerPenalty,
+                      },
+                    })
+                  }
+                >
+                  <option value={0}>No pasa nada (se mantiene en su casilla)</option>
+                  <option value={1}>Retroceder 1 casilla</option>
+                  <option value={2}>Retroceder 2 casillas</option>
                 </select>
               </label>
 

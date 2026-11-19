@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowLeft, Eye, KeyRound, PlusCircle, Shield, Users } from 'lucide-react';
-import { Difficulty } from '@prl-oca/shared';
+import { Difficulty, WrongAnswerPenalty } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 
 export const CreateJoinScreen: React.FC = () => {
@@ -22,6 +22,7 @@ export const CreateJoinScreen: React.FC = () => {
   const [maxPlayers, setMaxPlayers] = useState<number>(15);
   const [diceMode, setDiceMode] = useState<'1d6' | '2d6'>('1d6');
   const [difficultyFilter, setDifficultyFilter] = useState<Difficulty | 'todas'>('todas');
+  const [wrongAnswerPenalty, setWrongAnswerPenalty] = useState<WrongAnswerPenalty>(0);
 
   // Join Room Form State
   const [joinCode, setJoinCode] = useState('PRL101');
@@ -52,6 +53,7 @@ export const CreateJoinScreen: React.FC = () => {
         maxPlayers,
         diceMode,
         difficultyFilter,
+        wrongAnswerPenalty,
       },
     });
   };
@@ -184,6 +186,20 @@ export const CreateJoinScreen: React.FC = () => {
                   <option value="facil">Nivel Básico / Fácil (30s)</option>
                   <option value="intermedio">Nivel Intermedio (45s)</option>
                   <option value="avanzado">Nivel Técnico Avanzado (60s)</option>
+                </select>
+              </label>
+
+              <label>
+                Si se falla una pregunta:
+                <select
+                  value={wrongAnswerPenalty}
+                  onChange={(e) =>
+                    setWrongAnswerPenalty(Number(e.target.value) as WrongAnswerPenalty)
+                  }
+                >
+                  <option value={0}>No pasa nada (se mantiene en su casilla)</option>
+                  <option value={1}>Retrocede 1 casilla</option>
+                  <option value={2}>Retrocede 2 casillas</option>
                 </select>
               </label>
 

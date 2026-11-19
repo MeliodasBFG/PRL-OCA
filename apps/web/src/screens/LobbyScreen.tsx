@@ -58,6 +58,16 @@ export const LobbyScreen: React.FC = () => {
               <span className="meta-pill">
                 Dados: <strong>{roomState.config.diceMode.toUpperCase()}</strong>
               </span>
+              <span className="meta-pill">
+                Fallo en pregunta:{' '}
+                <strong>
+                  {roomState.config.wrongAnswerPenalty === 0
+                    ? 'Sin retroceso'
+                    : `Retrocede ${roomState.config.wrongAnswerPenalty} ${
+                        roomState.config.wrongAnswerPenalty === 1 ? 'casilla' : 'casillas'
+                      }`}
+                </strong>
+              </span>
             </div>
           </div>
 

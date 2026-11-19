@@ -226,6 +226,7 @@ export const DEFAULT_GAME_CONFIG: GameConfig = {
   maxPlayers: 15,
   diceMode: '1d6',
   difficultyFilter: 'todas',
+  wrongAnswerPenalty: 0,
   enabledCategories: [...ALL_PRL_CATEGORIES],
   timers: {
     facil: 30,
