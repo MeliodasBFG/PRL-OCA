@@ -36,7 +36,7 @@ apps/web/dist
 ---
 
 ### D. Qué carpeta seleccionar para Cloudflare Workers
-- En **Cloudflare Workers Builds** (conexión directa a GitHub): selecciona **`/`** (raíz del repositorio) como directorio de compilación (*Path / Root directory*) para que `npm install` resuelva `@prl-oca/shared` y el `package-lock.json` raíz.
+- En **Cloudflare Workers Builds** (conexión directa a GitHub): selecciona **`/`** (raíz del repositorio) como directorio de compilación (*Path / Root directory*) para que `npm install` resuelva `@prl-oca/shared` y el `package-lock.json` raíz, y nombra el proyecto Worker exactamente **`prl-oca-realtime`** (evita el nombre por defecto `realtime` que Cloudflare asignaría si conectaras la carpeta `apps/realtime` directamente).
 - *(El código y configuración del Worker residen en `apps/realtime/src/index.ts` y `apps/realtime/wrangler.jsonc`).*
 
 ### E. Qué comando de construcción introducir para Cloudflare Workers (Build command)
@@ -69,9 +69,9 @@ Configúralas en **Pages → Settings → Environment variables** (tanto en *Pro
 ### H. Qué variables y secretos crear en Cloudflare Workers
 
 #### 1. Variables de entorno no secretas (`vars` en `apps/realtime/wrangler.jsonc`)
-En `apps/realtime/wrangler.jsonc` (`env.production.vars`):
+En `apps/realtime/wrangler.jsonc` (tanto en el bloque raíz por defecto como en `env.production.vars`, para que cualquier despliegue CI con o sin `--env production` use siempre producción):
 - `ENVIRONMENT`: `"production"`
-- `ALLOWED_ORIGIN`: `"https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev"` — **sustitúyelo o amplíalo** con el dominio `.pages.dev` exacto asignado a tu proyecto Pages y tu dominio personalizado si añades uno.
+- `ALLOWED_ORIGIN`: `"https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev"` — **sustitúyelo o amplíalo** con el dominio `.pages.dev` exacto asignado a tu proyecto Pages y tu dominio personalizado si añades uno (no usa `"*"` en producción ni en preview).
 
 > El módulo `apps/realtime/src/security/auth.ts` valida orígenes múltiples separados por coma y subdominios wildcard de `pages.dev` tanto en peticiones HTTP CORS (`Access-Control-Allow-Origin` + `Vary: Origin`) como en el handshake WebSocket (`403` si un sitio externo no autorizado intenta conectarse en producción).
 
@@ -102,22 +102,12 @@ npx wrangler secret put TEACHER_ADMIN_SECRET --config apps/realtime/wrangler.jso
    - *Requisito de cuenta:* Cloudflare Workers Paid plan para usar Durable Objects en producción (la mayoría de usos docentes pequeños entran dentro del uso incluido del plan).
 
 2. **Base de datos Cloudflare D1 (`prl-oca-db`) — NECESARIA para persistir banco de preguntas e historial global:**
-   - Binding en `wrangler.jsonc`: `DB` (configurado en entorno base, `preview` y `production`), `database_name`: `prl-oca-db`, `migrations_dir`: `../../migrations`.
-   - **Pasos obligatorios antes del primer despliegue:**
-     1. Inicia sesión en Cloudflare:
-        ```bash
-        npx wrangler login
-        ```
-     2. Crea la base de datos:
-        ```bash
-        npx wrangler d1 create prl-oca-db
-        ```
-     3. Copia el `database_id` real devuelto por Cloudflare y pégalo en `apps/realtime/wrangler.jsonc` sustituyendo **`REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID`** en los tres bloques (`d1_databases` raíz, `env.preview.d1_databases` y `env.production.d1_databases`).
-     4. Aplica la migración SQL inicial (`migrations/0001_initial_schema.sql`) en remoto:
-        ```bash
-        npx wrangler d1 migrations apply prl-oca-db --config apps/realtime/wrangler.jsonc --env production --remote
-        ```
-        *(Este comando crea las tablas `questions` y `match_history`).*
+   - Binding en `wrangler.jsonc`: `DB` (configurado en raíz, `development`, `preview` y `production`), `database_name`: `prl-oca-db`, `database_id`: `280f76b4-9ec0-46d3-93b2-d79457b9149f`, `migrations_dir`: `../../migrations`.
+   - **Aplica la migración SQL inicial (`migrations/0001_initial_schema.sql`) en remoto:**
+     ```bash
+     npx wrangler d1 migrations apply prl-oca-db --config apps/realtime/wrangler.jsonc --env production --remote
+     ```
+     *(Este comando crea las tablas `questions` y `match_history` y sus índices en Cloudflare D1. Para comprobar las migraciones pendientes/aplicadas en cualquier momento: `npx wrangler d1 migrations list prl-oca-db --config apps/realtime/wrangler.jsonc --env production --remote`).*
 
 3. **Cloudflare R2 (`ASSETS_BUCKET`) — NO ES NECESARIO:**
    - Todos los modelos 3D, materiales, texturas canvas, SVG y sonidos/músicas Web Audio API son **100% procedurales** e incluidos directamente en el frontend (`ASSETS_LICENSES.md`).
@@ -131,8 +121,8 @@ npx wrangler secret put TEACHER_ADMIN_SECRET --config apps/realtime/wrangler.jso
 
 Sigue este orden exacto para conectar Frontend (Pages) ↔ Backend (Worker):
 
-1. **Crea la base de datos D1 y aplica la migración** (Paso I.2), rellenando el `database_id` real en `apps/realtime/wrangler.jsonc` y subiendo el cambio a tu repo GitHub.
-2. **Despliega primero el Worker `prl-oca-realtime`** desde Cloudflare Workers Builds (con configuración D, E, F) y añade los secretos `TEACHER_TOKEN_SECRET` y `TEACHER_ADMIN_SECRET`.
+1. **Aplica la migración D1 remota** (`migrations/0001_initial_schema.sql`) usando el comando del apartado I.2 (el `database_id` `280f76b4-9ec0-46d3-93b2-d79457b9149f` ya está configurado en `apps/realtime/wrangler.jsonc`).
+2. **Asegúrate de que el Worker en Cloudflare se llame `prl-oca-realtime`** (no `realtime`). Despliega el Worker desde Cloudflare Workers Builds (con configuración D, E, F) y añade los secretos `TEACHER_TOKEN_SECRET` y `TEACHER_ADMIN_SECRET`.
 3. **Anota la URL HTTPS pública asignada al Worker**, por ejemplo:
    `https://prl-oca-realtime.<tu-subdominio>.workers.dev`
    Comprueba en el navegador que `.../api/health` responde `{"ok":true,...}`.

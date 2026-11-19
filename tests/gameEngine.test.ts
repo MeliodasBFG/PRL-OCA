@@ -4,7 +4,9 @@ import {
   BADGE_DEFINITIONS,
   BOARD_TILES,
   CHALLENGES_3D,
+  CreateRoomRequestSchema,
   INITIAL_QUESTION_BANK,
+  QuestionItemSchema,
   advanceTurnServerSide,
   completeChallenge3DServerSide,
   createInitialRoomState,
@@ -241,5 +243,14 @@ describe('PRL-OCA 3D - Tablero de 48 Casillas, Contenidos y Motor Autoritativo',
 
     expect(isLocalFallbackEnabled({ VITE_ENABLE_LOCAL_FALLBACK: 'false' })).toBe(false);
     expect(isLocalFallbackEnabled({})).toBe(true);
+
+    // Validar esquemas Zod v4 de creación de sala y pregunta
+    const roomParse = CreateRoomRequestSchema.safeParse({
+      teacherPin: 'SEGURA2026',
+      teacherName: 'Docente PRL',
+      config: { wrongAnswerPenalty: 1, diceMode: '2d6' },
+    });
+    expect(roomParse.success).toBe(true);
+    expect(QuestionItemSchema.safeParse(INITIAL_QUESTION_BANK[0]).success).toBe(true);
   });
 });

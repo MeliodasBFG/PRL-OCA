@@ -5,8 +5,8 @@
   "compatibility_date": "2025-01-01",
   "workers_dev": true,
   "vars": {
-    "ALLOWED_ORIGIN": "*",
-    "ENVIRONMENT": "development"
+    "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev",
+    "ENVIRONMENT": "production"
   },
   "durable_objects": {
     "bindings": [
@@ -26,7 +26,7 @@
     {
       "binding": "DB",
       "database_name": "prl-oca-db",
-      "database_id": "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID",
+      "database_id": "280f76b4-9ec0-46d3-93b2-d79457b9149f",
       "migrations_dir": "../../migrations"
     }
   ],
@@ -39,11 +39,35 @@
   //   }
   // ],
   "env": {
+    "development": {
+      "name": "prl-oca-realtime-dev",
+      "workers_dev": true,
+      "vars": {
+        "ALLOWED_ORIGIN": "*",
+        "ENVIRONMENT": "development"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "GAME_ROOMS",
+            "class_name": "GameRoom"
+          }
+        ]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "prl-oca-db",
+          "database_id": "280f76b4-9ec0-46d3-93b2-d79457b9149f",
+          "migrations_dir": "../../migrations"
+        }
+      ]
+    },
     "preview": {
       "name": "prl-oca-realtime-preview",
       "workers_dev": true,
       "vars": {
-        "ALLOWED_ORIGIN": "*",
+        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev",
         "ENVIRONMENT": "preview"
       },
       "durable_objects": {
@@ -58,7 +82,7 @@
         {
           "binding": "DB",
           "database_name": "prl-oca-db",
-          "database_id": "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID",
+          "database_id": "280f76b4-9ec0-46d3-93b2-d79457b9149f",
           "migrations_dir": "../../migrations"
         }
       ]
@@ -82,7 +106,7 @@
         {
           "binding": "DB",
           "database_name": "prl-oca-db",
-          "database_id": "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID",
+          "database_id": "280f76b4-9ec0-46d3-93b2-d79457b9149f",
           "migrations_dir": "../../migrations"
         }
       ]
