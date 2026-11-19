@@ -7,6 +7,7 @@ import {
   Team,
   TileDefinition,
 } from '@prl-oca/shared';
+import { getContrastTextColor } from '../utils/mobileOrientation';
 
 interface Board2DFallbackProps {
   teams: Team[];
@@ -61,7 +62,13 @@ export const Board2DFallback: React.FC<Board2DFallbackProps> = ({
               aria-label={`Casilla ${tile.index}: ${tile.name} (${TILE_TYPE_LABELS[tile.type]})`}
             >
               <div className="tile-2d-top">
-                <span className="tile-2d-num" style={{ background: tile.color }}>
+                <span
+                  className="tile-2d-num"
+                  style={{
+                    background: tile.color,
+                    color: getContrastTextColor(tile.color),
+                  }}
+                >
                   #{tile.index}
                 </span>
                 <span className="tile-2d-zone">{INDUSTRIAL_ZONE_LABELS[tile.zone]}</span>

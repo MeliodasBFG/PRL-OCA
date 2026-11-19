@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ArrowLeft, Eye, KeyRound, PlusCircle, Shield, Users } from 'lucide-react';
 import { Difficulty, WrongAnswerPenalty } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
+import { enterGameLandscapeMode } from '../utils/mobileOrientation';
 
 export const CreateJoinScreen: React.FC = () => {
   const {
@@ -43,6 +44,7 @@ export const CreateJoinScreen: React.FC = () => {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    void enterGameLandscapeMode();
     await createRoom({
       teacherName,
       teacherPin,
@@ -60,6 +62,7 @@ export const CreateJoinScreen: React.FC = () => {
 
   const handleJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    void enterGameLandscapeMode();
     await joinRoom({
       roomCode: joinCode,
       playerName: joinAlias,

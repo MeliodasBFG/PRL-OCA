@@ -13,6 +13,7 @@ import {
 import { TEAM_ROLE_INFO } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 import { LobbyScene3D } from '../scenes/LobbyScene3D';
+import { enterGameLandscapeMode } from '../utils/mobileOrientation';
 
 export const LobbyScreen: React.FC = () => {
   const {
@@ -132,7 +133,10 @@ export const LobbyScreen: React.FC = () => {
                 <button
                   type="button"
                   className="btn-primary btn-lg"
-                  onClick={() => runTeacherCommand({ kind: 'START_GAME' })}
+                  onClick={() => {
+                    void enterGameLandscapeMode();
+                    runTeacherCommand({ kind: 'START_GAME' });
+                  }}
                 >
                   <Play size={20} /> INICIAR PARTIDA EN TABLERO 3D
                 </button>

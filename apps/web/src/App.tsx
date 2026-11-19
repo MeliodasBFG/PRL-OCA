@@ -54,7 +54,7 @@ export const App: React.FC = () => {
 
   return (
     <div
-      className={`app-shell ${highContrast ? 'theme-high-contrast' : ''} ${
+      className={`app-shell screen-${screen} ${highContrast ? 'theme-high-contrast' : ''} ${
         reducedMotion ? 'theme-reduced-motion' : ''
       }`}
     >

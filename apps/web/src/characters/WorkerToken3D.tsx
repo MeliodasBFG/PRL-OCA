@@ -250,7 +250,13 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
       <SafetyHelmet3D color="#FFB800" scale={0.74} position={[0, 1.04, 0]} />
 
       {!hideHtmlOverlays && isActiveTurn && (
-        <Html position={[0, 1.54, 0]} center zIndexRange={[8, 0]}>
+        <Html
+          position={[0, 1.54, 0]}
+          center
+          zIndexRange={[8, 0]}
+          wrapperClass="no-pointer-html"
+          style={{ pointerEvents: 'none' }}
+        >
           <div
             className="active-token-pill"
             style={{

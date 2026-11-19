@@ -110,12 +110,12 @@ export const HeaderBar: React.FC = () => {
                 </select>
                 <button
                   type="button"
-                  className="btn-ghost-sm"
+                  className="btn-ghost-sm hide-mobile"
                   onClick={resetCamera}
                   title="Recuperar perspectiva original"
                 >
                   <RotateCcw size={13} />
-                  <span className="hide-mobile">Reset Vista</span>
+                  <span>Reset Vista</span>
                 </button>
               </div>
 

@@ -1,8 +1,9 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Html, OrbitControls, RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
 import { Challenge3DDefinition, ChallengeHotspot3D } from '@prl-oca/shared';
+import { isTouchPointerEvent } from '../utils/mobileOrientation';
 import {
   BIEFireCabinet3D,
   CircularSawBench3D,
@@ -615,6 +616,29 @@ const HotspotMarker3D: React.FC<{
 }> = ({ hotspot, index, isSelected, revealed, onToggle }) => {
   const ringRef = useRef<THREE.Mesh>(null);
   const [hovered, setHovered] = useState(false);
+  const hoverOutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (hoverOutTimerRef.current) clearTimeout(hoverOutTimerRef.current);
+    };
+  }, []);
+
+  const enterHover = () => {
+    if (hoverOutTimerRef.current) {
+      clearTimeout(hoverOutTimerRef.current);
+      hoverOutTimerRef.current = null;
+    }
+    setHovered(true);
+  };
+
+  const leaveHover = () => {
+    if (hoverOutTimerRef.current) clearTimeout(hoverOutTimerRef.current);
+    hoverOutTimerRef.current = setTimeout(() => {
+      setHovered(false);
+      hoverOutTimerRef.current = null;
+    }, 75);
+  };
 
   useFrame(({ clock }) => {
     if (ringRef.current) {
@@ -638,11 +662,12 @@ const HotspotMarker3D: React.FC<{
       position={hotspot.position}
       onPointerOver={(e) => {
         e.stopPropagation();
-        setHovered(true);
+        if (e.pointerType !== 'touch') enterHover();
       }}
-      onPointerOut={() => setHovered(false)}
+      onPointerOut={leaveHover}
       onClick={(e) => {
         e.stopPropagation();
+        if (e.delta > (isTouchPointerEvent(e) ? 16 : 8)) return;
         onToggle();
       }}
     >
@@ -669,6 +694,8 @@ const HotspotMarker3D: React.FC<{
         <button
           type="button"
           onClick={onToggle}
+          onMouseEnter={enterHover}
+          onMouseLeave={leaveHover}
           title={hotspot.label}
           className={`hotspot-3d-badge ${isSelected ? 'selected' : ''} ${
             revealed ? (hotspot.isCorrect ? 'correct' : 'wrong') : ''

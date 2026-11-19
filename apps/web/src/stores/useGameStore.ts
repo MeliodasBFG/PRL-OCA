@@ -20,6 +20,7 @@ import {
 } from '@prl-oca/shared';
 import { ConnectionState, mpClient } from '../multiplayer/wsClient';
 import { soundEngine } from '../audio/SoundEngine';
+import { enterGameLandscapeMode, exitGameLandscapeMode } from '../utils/mobileOrientation';
 
 export type AppScreen =
   | 'home'
@@ -353,6 +354,9 @@ export const useGameStore = create<GameStore>((set, get) => {
         teacherToken: msg.teacherToken ?? get().teacherToken,
         screen: nextScreen,
       });
+      if (nextScreen === 'game') {
+        void enterGameLandscapeMode();
+      }
     } else if (msg.type === 'DICE_ROLLED') {
       soundEngine.playSfx('dice_hit');
       set({
@@ -423,6 +427,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         soundEngine.playMusic('menu');
       } else if (screen === 'game') {
         soundEngine.playMusic('board');
+        void enterGameLandscapeMode();
       } else if (screen === 'victory') {
         soundEngine.playMusic('victory');
       }
@@ -708,6 +713,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         isTokenMoving: false,
         challengeModalReady: true,
       });
+      void enterGameLandscapeMode();
     },
 
     populate15DemoPlayers: () => {
@@ -765,6 +771,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       clearMovementTimers();
       mpClient.disconnect();
       soundEngine.playMusic('menu');
+      void exitGameLandscapeMode();
       set({
         roomState: null,
         screen: 'home',

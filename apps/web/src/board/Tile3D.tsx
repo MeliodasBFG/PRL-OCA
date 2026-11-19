@@ -1,8 +1,9 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Html, RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
 import { TileDefinition } from '@prl-oca/shared';
+import { isTouchPointerEvent } from '../utils/mobileOrientation';
 import {
   ClipboardMagnifier3D,
   FireExtinguisher3D,
@@ -262,6 +263,23 @@ export const Tile3D: React.FC<Tile3DProps> = ({
   const [hovered, setHovered] = useState(false);
   const iconGroupRef = useRef<THREE.Group>(null);
   const ringRef = useRef<THREE.Mesh>(null);
+  const hoverOutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (hoverOutTimerRef.current) clearTimeout(hoverOutTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (hideHtmlOverlays) {
+      if (hoverOutTimerRef.current) {
+        clearTimeout(hoverOutTimerRef.current);
+        hoverOutTimerRef.current = null;
+      }
+      setHovered(false);
+    }
+  }, [hideHtmlOverlays]);
 
   const topTexture = useMemo(() => createTileTopTexture(tile), [tile]);
 
@@ -293,11 +311,30 @@ export const Tile3D: React.FC<Tile3DProps> = ({
       position={tile.position}
       onPointerOver={(e) => {
         e.stopPropagation();
+        if (e.pointerType === 'touch') return;
+        if (hoverOutTimerRef.current) {
+          clearTimeout(hoverOutTimerRef.current);
+          hoverOutTimerRef.current = null;
+        }
         setHovered(true);
       }}
-      onPointerOut={() => setHovered(false)}
+      onPointerOut={() => {
+        if (hoverOutTimerRef.current) clearTimeout(hoverOutTimerRef.current);
+        // Debounce exit so child mesh transitions (e.g. rotating icon) never flicker the tooltip
+        hoverOutTimerRef.current = setTimeout(() => {
+          setHovered(false);
+          hoverOutTimerRef.current = null;
+        }, 75);
+      }}
       onClick={(e) => {
         e.stopPropagation();
+        const maxDragDelta = isTouchPointerEvent(e) ? 16 : 8;
+        if (e.delta > maxDragDelta) return;
+        if (hoverOutTimerRef.current) {
+          clearTimeout(hoverOutTimerRef.current);
+          hoverOutTimerRef.current = null;
+        }
+        setHovered(false);
         onSelectTile?.(tile);
       }}
     >
@@ -376,7 +413,13 @@ export const Tile3D: React.FC<Tile3DProps> = ({
       </group>
 
       {!hideHtmlOverlays && hovered && (
-        <Html position={[0, baseHeight / 2 + 0.95, 0]} center zIndexRange={[10, 0]}>
+        <Html
+          position={[0, baseHeight / 2 + 1.02, 0]}
+          center
+          zIndexRange={[10, 0]}
+          wrapperClass="no-pointer-html"
+          style={{ pointerEvents: 'none' }}
+        >
           <div className="tile-hover-tooltip">
             <strong>
               #{tile.index} · {tile.name}

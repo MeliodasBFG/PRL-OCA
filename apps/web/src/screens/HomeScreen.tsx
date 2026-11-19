@@ -15,6 +15,7 @@ import {
 import { useGameStore } from '../stores/useGameStore';
 import { HomeScene3D } from '../scenes/HomeScene3D';
 import { soundEngine } from '../audio/SoundEngine';
+import { enterGameLandscapeMode } from '../utils/mobileOrientation';
 
 export const HomeScreen: React.FC = () => {
   const {
@@ -204,7 +205,10 @@ export const HomeScreen: React.FC = () => {
               <button
                 type="button"
                 className="btn-primary"
-                onClick={() => startIndividualGame(soloName)}
+                onClick={() => {
+                  void enterGameLandscapeMode();
+                  startIndividualGame(soloName);
+                }}
               >
                 Comenzar Partida 3D
               </button>
