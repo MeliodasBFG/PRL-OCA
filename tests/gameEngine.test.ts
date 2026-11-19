@@ -8,8 +8,10 @@ import {
   advanceTurnServerSide,
   completeChallenge3DServerSide,
   createInitialRoomState,
+  disconnectPlayerFromState,
   executeTeacherCommandServerSide,
   joinPlayerToState,
+  normalizePlayerName,
   rollDiceServerSide,
   submitAnswerServerSide,
 } from '@prl-oca/shared';
@@ -143,5 +145,61 @@ describe('PRL-OCA 3D - Tablero de 48 Casillas, Contenidos y Motor Autoritativo',
     submitAnswerServerSide(state2, 'p1', [wrongIdx2], false);
     expect(state2.teams[0].position).toBe(2);
     expect(state2.activeChallenge?.retreatTiles).toBe(2);
+  });
+
+  it('reconecta a un jugador con el mismo nombre (sin duplicarlo) tras salirse y mantiene su equipo y progreso', () => {
+    const state = createInitialRoomState('RECON1', {
+      mode: 'teams',
+      teamCount: 3,
+      maxPlayers: 2,
+    });
+
+    // Dos participantes llenan el aforo máximo de la sala (2/2)
+    const p1Join = joinPlayerToState(state, {
+      playerId: 'plr_orig_1',
+      playerName: 'María López',
+      preferredTeamId: 'team_2',
+    });
+    const p2Join = joinPlayerToState(state, {
+      playerId: 'plr_orig_2',
+      playerName: 'Carlos Ruiz',
+      preferredTeamId: 'team_1',
+    });
+    expect(p1Join.ok).toBe(true);
+    expect(p2Join.ok).toBe(true);
+    expect(state.players).toHaveLength(2);
+
+    // Se inicia la partida y avanzan las puntuaciones
+    state.status = 'playing';
+    state.teams[1].score = 45;
+    state.teams[1].position = 11;
+
+    // María sale de la partida
+    expect(disconnectPlayerFromState(state, 'plr_orig_1')).toBe(true);
+    expect(state.players.find((p) => p.id === 'plr_orig_1')?.connected).toBe(false);
+
+    // Vuelve a entrar desde otra pestaña/dispositivo (otro playerId) escribiendo distinto formato de nombre
+    const rejoin = joinPlayerToState(state, {
+      playerId: 'plr_nueva_pestana_999',
+      playerName: '  maria   lopez ',
+    });
+    expect(rejoin.ok).toBe(true);
+    expect(rejoin.reconnected).toBe(true);
+    expect(rejoin.player?.id).toBe('plr_orig_1');
+    expect(rejoin.player?.teamId).toBe('team_2');
+    expect(rejoin.player?.connected).toBe(true);
+
+    // No se duplica ningún nombre y se conserva el estado de la partida
+    expect(state.players).toHaveLength(2);
+    expect(state.teams[1].score).toBe(45);
+    expect(state.teams[1].position).toBe(11);
+    expect(normalizePlayerName(rejoin.player?.name ?? '')).toBe('maria lopez');
+
+    // Un docente con el mismo nombre no colisiona con el alumno, y un tercero ajeno sí topa con el límite 2/2
+    const thirdUser = joinPlayerToState(state, {
+      playerId: 'plr_extra_3',
+      playerName: 'Lucía Moreno',
+    });
+    expect(thirdUser.ok).toBe(false);
   });
 });

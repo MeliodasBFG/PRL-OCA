@@ -180,6 +180,25 @@ export function createInitialRoomState(
   };
 }
 
+export function normalizePlayerName(name: string): string {
+  return name
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+export function disconnectPlayerFromState(state: GameRoomState, playerId: string): boolean {
+  const player = state.players.find((p) => p.id === playerId);
+  if (!player) return false;
+  if (player.connected) {
+    player.connected = false;
+    state.updatedAt = Date.now();
+  }
+  return true;
+}
+
 export function joinPlayerToState(
   state: GameRoomState,
   params: {
@@ -189,20 +208,70 @@ export function joinPlayerToState(
     isTeacher?: boolean;
     isSpectator?: boolean;
   }
-): { ok: boolean; error?: string; player?: Player } {
-  const existing = state.players.find((p) => p.id === params.playerId);
+): { ok: boolean; error?: string; player?: Player; reconnected?: boolean } {
+  const cleanName = params.playerName.trim().replace(/\s+/g, ' ');
+  const wantTeacher = Boolean(params.isTeacher);
+  const wantSpectator = Boolean(params.isSpectator);
+  const normalizedTarget = normalizePlayerName(cleanName);
+
+  // 1. Match returning participant first by ID (same role) or normalized name (same role)
+  // so reloading, switching tabs/devices, or leaving and re-entering never duplicates a player.
+  const existingById = state.players.find(
+    (p) =>
+      p.id === params.playerId &&
+      Boolean(p.isTeacher) === wantTeacher &&
+      Boolean(p.isSpectator) === wantSpectator
+  );
+  const existingByName =
+    !existingById && normalizedTarget.length > 0
+      ? state.players.find(
+          (p) =>
+            Boolean(p.isTeacher) === wantTeacher &&
+            Boolean(p.isSpectator) === wantSpectator &&
+            normalizePlayerName(p.name) === normalizedTarget
+        )
+      : undefined;
+
+  const existing = existingById ?? existingByName;
   if (existing) {
+    const wasDisconnected = !existing.connected;
+    const switchedClientSession = existing.id !== params.playerId;
     existing.connected = true;
-    existing.name = params.playerName.trim() || existing.name;
-    if (params.isTeacher !== undefined) existing.isTeacher = params.isTeacher;
-    if (params.isSpectator !== undefined) existing.isSpectator = params.isSpectator;
+    if (cleanName) {
+      existing.name = cleanName;
+    }
+
+    // Preserve previous team assignment (or assign valid team if somehow invalid)
+    if (!wantTeacher && !wantSpectator) {
+      const hasValidTeam = state.teams.some((t) => t.id === existing.teamId);
+      if (!hasValidTeam) {
+        const preferred = state.teams.find((t) => t.id === params.preferredTeamId);
+        existing.teamId = preferred?.id ?? state.teams[0]?.id ?? 'team_1';
+      }
+    }
+
     refreshAllTeamRoles(state);
+    if (wasDisconnected || switchedClientSession) {
+      const teamName = state.teams.find((t) => t.id === existing.teamId)?.name;
+      state.logs.unshift(
+        createLog(
+          'system',
+          wantTeacher
+            ? `El docente ${existing.name} se ha reconectado al panel de control.`
+            : wantSpectator
+            ? `Modo proyección/espectador (${existing.name}) reconectado.`
+            : `${existing.name} se ha vuelto a conectar al ${teamName ?? existing.teamId} manteniendo su progreso.`,
+          existing.teamId
+        )
+      );
+      state.logs = state.logs.slice(0, 60);
+    }
     state.updatedAt = Date.now();
-    return { ok: true, player: existing };
+    return { ok: true, player: existing, reconnected: true };
   }
 
   const activeParticipants = state.players.filter((p) => !p.isTeacher && !p.isSpectator);
-  if (!params.isTeacher && !params.isSpectator && activeParticipants.length >= state.config.maxPlayers) {
+  if (!wantTeacher && !wantSpectator && activeParticipants.length >= state.config.maxPlayers) {
     return {
       ok: false,
       error: `La sala ha alcanzado el límite configurado de ${state.config.maxPlayers} participantes.`,
@@ -211,7 +280,7 @@ export function joinPlayerToState(
 
   // Pick balanced team if not specified or invalid
   let assignedTeamId = 'spectator';
-  if (!params.isTeacher && !params.isSpectator) {
+  if (!wantTeacher && !wantSpectator) {
     const validPreferred = state.teams.find((t) => t.id === params.preferredTeamId);
     if (validPreferred) {
       assignedTeamId = validPreferred.id;
@@ -232,12 +301,12 @@ export function joinPlayerToState(
 
   const newPlayer: Player = {
     id: params.playerId,
-    name: params.playerName.trim(),
+    name: cleanName || 'Participante',
     teamId: assignedTeamId,
     connected: true,
     ready: true,
-    isTeacher: Boolean(params.isTeacher),
-    isSpectator: Boolean(params.isSpectator),
+    isTeacher: wantTeacher,
+    isSpectator: wantSpectator,
     joinedAt: Date.now(),
   };
 
@@ -246,9 +315,9 @@ export function joinPlayerToState(
   state.logs.unshift(
     createLog(
       'system',
-      params.isTeacher
+      wantTeacher
         ? `El docente ${newPlayer.name} se ha conectado al panel de control.`
-        : params.isSpectator
+        : wantSpectator
         ? `Modo proyección/espectador (${newPlayer.name}) conectado.`
         : `${newPlayer.name} se ha unido al ${
             state.teams.find((t) => t.id === assignedTeamId)?.name ?? assignedTeamId
@@ -258,7 +327,7 @@ export function joinPlayerToState(
   );
   state.logs = state.logs.slice(0, 60);
   state.updatedAt = Date.now();
-  return { ok: true, player: newPlayer };
+  return { ok: true, player: newPlayer, reconnected: false };
 }
 
 export function selectQuestionForTile(

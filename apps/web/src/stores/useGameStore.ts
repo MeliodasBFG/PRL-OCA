@@ -12,6 +12,7 @@ import {
   buildMatchHistoryFromState,
   completeChallenge3DServerSide,
   createInitialRoomState,
+  disconnectPlayerFromState,
   executeTeacherCommandServerSide,
   joinPlayerToState,
   refreshAllTeamRoles,
@@ -90,14 +91,27 @@ function loadStoredHistory(): MatchHistoryRecord[] {
   return [];
 }
 
+const PLAYER_ID_STORAGE_KEY = 'prl_oca_player_id';
+
 function getOrCreatePlayerId(): string {
   if (typeof window === 'undefined') return 'player_local';
-  const key = 'prl_oca_player_id';
-  const existing = window.sessionStorage.getItem(key);
+  const existing = window.sessionStorage.getItem(PLAYER_ID_STORAGE_KEY);
   if (existing) return existing;
   const created = `plr_${Math.random().toString(36).slice(2, 10)}`;
-  window.sessionStorage.setItem(key, created);
+  window.sessionStorage.setItem(PLAYER_ID_STORAGE_KEY, created);
   return created;
+}
+
+function persistSessionPlayerIdentity(playerId: string, playerName?: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(PLAYER_ID_STORAGE_KEY, playerId);
+    if (playerName?.trim()) {
+      window.sessionStorage.setItem('prl_oca_player_name', playerName.trim());
+    }
+  } catch {
+    // Ignore storage restriction
+  }
 }
 
 export interface GameStore {
@@ -172,6 +186,7 @@ export interface GameStore {
   }) => Promise<void>;
   startIndividualGame: (playerName: string) => void;
   populate15DemoPlayers: () => void;
+  markLocalDisconnect: () => void;
   leaveRoom: () => void;
 
   // Gameplay Actions
@@ -349,8 +364,14 @@ export const useGameStore = create<GameStore>((set, get) => {
         soundEngine.playSfx('dice_hit');
       }
 
+      if (msg.yourPlayerId) {
+        persistSessionPlayerIdentity(msg.yourPlayerId);
+        mpClient.updateJoinPlayerId(msg.yourPlayerId);
+      }
+
       set({
         roomState: msg.state,
+        playerId: msg.yourPlayerId ?? get().playerId,
         teacherToken: msg.teacherToken ?? get().teacherToken,
         screen: nextScreen,
       });
@@ -543,15 +564,19 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       const playerId = get().playerId;
-      joinPlayerToState(initialState, {
+      const teacherDisplayName = teacherName.trim() || 'Docente PRL';
+      const joinRes = joinPlayerToState(initialState, {
         playerId,
-        playerName: teacherName || 'Docente PRL',
+        playerName: teacherDisplayName,
         isTeacher: true,
       });
+      const resolvedPlayerId = joinRes.player?.id ?? playerId;
+      persistSessionPlayerIdentity(resolvedPlayerId, teacherDisplayName);
 
       set({
         roomState: { ...initialState },
-        playerName: teacherName || 'Docente PRL',
+        playerId: resolvedPlayerId,
+        playerName: teacherDisplayName,
         isTeacher: true,
         isSpectator: false,
         teacherPin: teacherPin || 'PRL2026',
@@ -562,21 +587,20 @@ export const useGameStore = create<GameStore>((set, get) => {
         challengeModalReady: true,
       });
 
-      mpClient.broadcastLocalState(initialState);
-
       mpClient.connect(
         roomCode,
         {
           type: 'JOIN_ROOM',
           actionId: `join_${Date.now()}`,
-          playerId,
-          playerName: teacherName || 'Docente PRL',
+          playerId: resolvedPlayerId,
+          playerName: teacherDisplayName,
           isTeacher: true,
           teacherPin: teacherPin || 'PRL2026',
         },
         (msg: ServerToClientMessage) => handleServerMessage(msg),
         (status) => set({ connectionStatus: status })
       );
+      mpClient.broadcastLocalState(initialState);
     },
 
     joinRoom: async ({
@@ -622,9 +646,10 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       const playerId = get().playerId;
+      const cleanAlias = playerName.trim() || 'Participante';
       const joinRes = joinPlayerToState(state, {
         playerId,
-        playerName: playerName.trim() || 'Participante',
+        playerName: cleanAlias,
         preferredTeamId,
         isTeacher,
         isSpectator,
@@ -635,12 +660,20 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
+      const resolvedPlayerId = joinRes.player?.id ?? playerId;
+      persistSessionPlayerIdentity(resolvedPlayerId, cleanAlias);
+
       const targetScreen: AppScreen =
-        state.status === 'playing' || state.status === 'paused' ? 'game' : 'lobby';
+        state.status === 'finished'
+          ? 'victory'
+          : state.status === 'playing' || state.status === 'paused'
+          ? 'game'
+          : 'lobby';
 
       set({
         roomState: { ...state },
-        playerName: playerName.trim() || 'Participante',
+        playerId: resolvedPlayerId,
+        playerName: cleanAlias,
         isTeacher: Boolean(isTeacher),
         isSpectator: Boolean(isSpectator),
         projectorMode: Boolean(isSpectator),
@@ -651,15 +684,13 @@ export const useGameStore = create<GameStore>((set, get) => {
         challengeModalReady: true,
       });
 
-      mpClient.broadcastLocalState(state);
-
       mpClient.connect(
         cleanCode,
         {
           type: 'JOIN_ROOM',
           actionId: `join_${Date.now()}`,
-          playerId,
-          playerName: playerName.trim() || 'Participante',
+          playerId: resolvedPlayerId,
+          playerName: cleanAlias,
           preferredTeamId,
           isTeacher,
           isSpectator,
@@ -668,6 +699,10 @@ export const useGameStore = create<GameStore>((set, get) => {
         (msg) => handleServerMessage(msg),
         (status) => set({ connectionStatus: status })
       );
+      mpClient.broadcastLocalState(state);
+      if (targetScreen === 'game') {
+        void enterGameLandscapeMode();
+      }
     },
 
     startIndividualGame: (playerName) => {
@@ -767,8 +802,17 @@ export const useGameStore = create<GameStore>((set, get) => {
       mpClient.broadcastLocalState(state);
     },
 
+    markLocalDisconnect: () => {
+      const state = get().roomState;
+      if (!state || get().connectionStatus === 'connected') return;
+      if (disconnectPlayerFromState(state, get().playerId)) {
+        mpClient.broadcastLocalState(state);
+      }
+    },
+
     leaveRoom: () => {
       clearMovementTimers();
+      get().markLocalDisconnect();
       mpClient.disconnect();
       soundEngine.playMusic('menu');
       void exitGameLandscapeMode();

@@ -22,6 +22,7 @@ export const App: React.FC = () => {
     setScreen,
     setCreateJoinTab,
     setCaptionToast,
+    markLocalDisconnect,
   } = useGameStore();
 
   // Connect SoundEngine visual captions for accessibility
@@ -40,17 +41,23 @@ export const App: React.FC = () => {
     };
   }, [setCaptionToast]);
 
-  // Auto-open Join screen if URL has ?room=CODE
+  // Auto-open Join screen if URL has ?room=CODE and notify local disconnect on tab close
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const roomParam = params.get('room');
-      if (roomParam) {
-        setCreateJoinTab('join');
-        setScreen('create_join');
-      }
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam) {
+      setCreateJoinTab('join');
+      setScreen('create_join');
     }
-  }, [setCreateJoinTab, setScreen]);
+    const handlePageHide = () => {
+      markLocalDisconnect();
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [setCreateJoinTab, setScreen, markLocalDisconnect]);
 
   return (
     <div

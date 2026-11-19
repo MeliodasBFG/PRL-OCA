@@ -1,6 +1,8 @@
 export {
   createInitialRoomState,
+  disconnectPlayerFromState,
   joinPlayerToState,
+  normalizePlayerName,
   rollDiceServerSide,
   submitAnswerServerSide,
   completeChallenge3DServerSide,

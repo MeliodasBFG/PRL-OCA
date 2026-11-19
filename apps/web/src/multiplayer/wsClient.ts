@@ -69,7 +69,11 @@ export class MultiplayerClient {
         clearTimeout(fallbackTimeout);
         this.onStatusCallback?.('connected');
         if (this.joinPayload) {
-          this.send(this.joinPayload);
+          // Always generate a fresh actionId so server deduplication never drops a reconnect JOIN_ROOM
+          this.send({
+            ...this.joinPayload,
+            actionId: `join_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          });
         }
         this.startPing();
       };
@@ -113,21 +117,34 @@ export class MultiplayerClient {
     return false;
   }
 
+  public updateJoinPlayerId(playerId: string): void {
+    if (this.joinPayload) {
+      this.joinPayload = { ...this.joinPayload, playerId };
+    }
+  }
+
   public broadcastLocalState(state: GameRoomState): void {
+    const code = state.roomCode.toUpperCase();
     if (typeof window !== 'undefined') {
       try {
-        window.localStorage.setItem(
-          `prl_oca_room_state_${this.roomCode}`,
-          JSON.stringify(state)
-        );
+        window.localStorage.setItem(`prl_oca_room_state_${code}`, JSON.stringify(state));
       } catch {
         // Ignore
       }
     }
-    this.channel?.postMessage({
+    const msg: ServerToClientMessage = {
       type: 'STATE_SYNC',
       state,
-    } satisfies ServerToClientMessage);
+    };
+    if (this.channel && this.roomCode === code) {
+      this.channel.postMessage(msg);
+      return;
+    }
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const tempChannel = new BroadcastChannel(`prl_oca_room_${code}`);
+      tempChannel.postMessage(msg);
+      tempChannel.close();
+    }
   }
 
   public loadCachedRoomState(roomCode: string): GameRoomState | null {

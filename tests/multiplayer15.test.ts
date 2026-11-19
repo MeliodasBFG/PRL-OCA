@@ -219,5 +219,41 @@ describe('Simulación Multijugador en Tiempo Real: 15 Participantes (3 Equipos �
       const p1 = reconnectedMsg.state.players.find((p) => p.id === 'player_1');
       expect(p1?.connected).toBe(true);
     }
+
+    // 10. Probar que un jugador (Participante 3) cierra sesión/pestaña y vuelve a entrar con OTRO playerId
+    //     en sala llena (15/15): no duplica su nombre, recupera su equipo/ID original y resiste el cierre tardío del socket viejo
+    const oldP3Socket = playerSockets[2];
+    await room.webSocketClose(oldP3Socket as unknown as WebSocket);
+
+    const newP3Socket = new MockSocket();
+    connectedSockets.push(newP3Socket);
+    await room.webSocketMessage(
+      newP3Socket as unknown as WebSocket,
+      JSON.stringify({
+        type: 'JOIN_ROOM',
+        actionId: 'act_reconnect_p_3_new_tab',
+        playerId: 'plr_nueva_sesion_mobile',
+        playerName: '  participante   3 ',
+      })
+    );
+
+    const p3Sync = newP3Socket.lastMessage();
+    expect(p3Sync?.type).toBe('STATE_SYNC');
+    if (p3Sync?.type === 'STATE_SYNC') {
+      expect(p3Sync.yourPlayerId).toBe('player_3');
+      const participants = p3Sync.state.players.filter((p) => !p.isTeacher && !p.isSpectator);
+      expect(participants).toHaveLength(15);
+      const matchingP3 = participants.filter((p) => p.id === 'player_3');
+      expect(matchingP3).toHaveLength(1);
+      expect(matchingP3[0].connected).toBe(true);
+    }
+
+    // Si el socket antiguo dispara webSocketClose después de la reconexión, NO debe desconectar al usuario activo
+    await room.webSocketClose(oldP3Socket as unknown as WebSocket);
+    const afterStaleClose = newP3Socket.lastMessage();
+    if (afterStaleClose?.type === 'STATE_SYNC') {
+      const p3 = afterStaleClose.state.players.find((p) => p.id === 'player_3');
+      expect(p3?.connected).toBe(true);
+    }
   });
 });

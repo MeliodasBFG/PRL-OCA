@@ -8,6 +8,7 @@ import {
   advanceTurnServerSide,
   completeChallenge3DServerSide,
   createInitialRoomState,
+  disconnectPlayerFromState,
   executeTeacherCommandServerSide,
   joinPlayerToState,
   refreshAllTeamRoles,
@@ -219,19 +220,35 @@ export class GameRoom {
     await this.handleValidatedMessage(ws, state, msg);
   }
 
+  private getActiveSockets(): WebSocket[] {
+    return typeof this.ctx.getWebSockets === 'function'
+      ? this.ctx.getWebSockets()
+      : Array.from(this.socketPlayers.keys());
+  }
+
   public async webSocketClose(ws: WebSocket): Promise<void> {
     const state = await this.ensureLoaded();
     const att = this.getSocketAttachment(ws);
+    this.socketPlayers.delete(ws);
+    if (typeof ws.serializeAttachment === 'function') {
+      try {
+        ws.serializeAttachment({ playerId: '' });
+      } catch {
+        // Socket already closed
+      }
+    }
+
     if (att?.playerId) {
-      const player = state.players.find((p) => p.id === att.playerId);
-      if (player) {
-        player.connected = false;
-        state.updatedAt = Date.now();
+      // Only mark disconnected when no newer active socket owns this player ID
+      const stillHasOtherSocket = this.getActiveSockets().some((other) => {
+        if (other === ws) return false;
+        return this.getSocketAttachment(other)?.playerId === att.playerId;
+      });
+      if (!stillHasOtherSocket && disconnectPlayerFromState(state, att.playerId)) {
         await this.persist();
         this.broadcast({ type: 'STATE_SYNC', state });
       }
     }
-    this.socketPlayers.delete(ws);
   }
 
   public async webSocketError(ws: WebSocket): Promise<void> {
@@ -297,8 +314,26 @@ export class GameRoom {
           return;
         }
 
+        const resolvedPlayerId = joinRes.player?.id ?? msg.playerId;
+
+        // Transfer ownership cleanly away from any previous dead/stale sockets for this player
+        for (const otherWs of this.getActiveSockets()) {
+          if (otherWs === ws) continue;
+          const otherAtt = this.getSocketAttachment(otherWs);
+          if (otherAtt?.playerId === resolvedPlayerId) {
+            this.socketPlayers.delete(otherWs);
+            if (typeof otherWs.serializeAttachment === 'function') {
+              try {
+                otherWs.serializeAttachment({ playerId: '' });
+              } catch {
+                // Ignore
+              }
+            }
+          }
+        }
+
         this.setSocketAttachment(ws, {
-          playerId: msg.playerId,
+          playerId: resolvedPlayerId,
           isTeacher: verifiedTeacher,
           isSpectator: msg.isSpectator,
         });
@@ -307,7 +342,7 @@ export class GameRoom {
         this.sendToSocket(ws, {
           type: 'STATE_SYNC',
           state,
-          yourPlayerId: msg.playerId,
+          yourPlayerId: resolvedPlayerId,
           teacherToken: issuedToken,
         });
         this.broadcast({ type: 'STATE_SYNC', state }, ws);

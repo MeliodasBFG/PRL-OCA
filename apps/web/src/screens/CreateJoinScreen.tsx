@@ -27,7 +27,10 @@ export const CreateJoinScreen: React.FC = () => {
 
   // Join Room Form State
   const [joinCode, setJoinCode] = useState('PRL101');
-  const [joinAlias, setJoinAlias] = useState('Alumno/a PRL');
+  const [joinAlias, setJoinAlias] = useState(() => {
+    if (typeof window === 'undefined') return 'Alumno/a PRL';
+    return window.sessionStorage.getItem('prl_oca_player_name') || 'Alumno/a PRL';
+  });
   const [joinRole, setJoinRole] = useState<'player' | 'spectator' | 'teacher'>('player');
   const [joinTeacherPin, setJoinTeacherPin] = useState('');
 
