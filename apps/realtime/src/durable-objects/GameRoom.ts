@@ -19,6 +19,7 @@ import {
   RateLimiter,
   buildCorsHeaders,
   createTeacherToken,
+  isOriginAllowed,
   verifyTeacherToken,
 } from '../security/auth';
 import { DatabaseService } from '../services/db';
@@ -29,6 +30,8 @@ export interface Env {
   ASSETS_BUCKET?: R2Bucket;
   ALLOWED_ORIGIN?: string;
   ENVIRONMENT?: string;
+  TEACHER_TOKEN_SECRET?: string;
+  TEACHER_ADMIN_SECRET?: string;
 }
 
 interface SocketAttachment {
@@ -44,7 +47,7 @@ interface SocketAttachment {
  */
 export class GameRoom {
   private stateData: GameRoomState | null = null;
-  private teacherPin = 'PRL2026';
+  private teacherPin: string = crypto.randomUUID();
   private processedActionIds = new Set<string>();
   private rateLimiter = new RateLimiter(45, 5000);
   private socketPlayers = new Map<WebSocket, SocketAttachment>();
@@ -77,7 +80,12 @@ export class GameRoom {
 
   public async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const cors = buildCorsHeaders(this.env.ALLOWED_ORIGIN ?? '*');
+    const requestOrigin = request.headers.get('Origin');
+    const cors = buildCorsHeaders(
+      this.env.ALLOWED_ORIGIN ?? '*',
+      requestOrigin,
+      this.env.ENVIRONMENT ?? 'development'
+    );
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: cors });
@@ -94,11 +102,15 @@ export class GameRoom {
         teacherPin?: string;
       };
       const code = (body.roomCode ?? roomCode).toUpperCase();
-      this.teacherPin = body.teacherPin || 'PRL2026';
+      this.teacherPin = body.teacherPin?.trim() || crypto.randomUUID().slice(0, 8);
       this.stateData = createInitialRoomState(code, body.config);
       await this.ctx.storage.put('teacher_pin', this.teacherPin);
       await this.persist();
-      const teacherToken = createTeacherToken(code, this.teacherPin);
+      const teacherToken = createTeacherToken(
+        code,
+        this.teacherPin,
+        this.env.TEACHER_TOKEN_SECRET
+      );
       return new Response(
         JSON.stringify({
           ok: true,
@@ -123,6 +135,18 @@ export class GameRoom {
 
     // WebSocket Upgrade for Real-Time Multiplayer
     if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+      if (
+        !isOriginAllowed(
+          requestOrigin,
+          this.env.ALLOWED_ORIGIN ?? '*',
+          this.env.ENVIRONMENT ?? 'development'
+        )
+      ) {
+        return new Response(JSON.stringify({ ok: false, error: 'Origen WebSocket no autorizado.' }), {
+          status: 403,
+          headers: { ...cors, 'Content-Type': 'application/json' },
+        });
+      }
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
 
@@ -286,7 +310,11 @@ export class GameRoom {
         if (msg.isTeacher) {
           if (msg.teacherPin === this.teacherPin) {
             verifiedTeacher = true;
-            issuedToken = createTeacherToken(state.roomCode, this.teacherPin);
+            issuedToken = createTeacherToken(
+              state.roomCode,
+              this.teacherPin,
+              this.env.TEACHER_TOKEN_SECRET
+            );
           } else {
             this.sendToSocket(ws, {
               type: 'ERROR',
@@ -473,7 +501,14 @@ export class GameRoom {
       }
 
       case 'TEACHER_ACTION': {
-        if (!verifyTeacherToken(msg.teacherToken, state.roomCode, this.teacherPin)) {
+        if (
+          !verifyTeacherToken(
+            msg.teacherToken,
+            state.roomCode,
+            this.teacherPin,
+            this.env.TEACHER_TOKEN_SECRET
+          )
+        ) {
           this.sendToSocket(ws, {
             type: 'ERROR',
             code: 'UNAUTHORIZED_TEACHER',

@@ -15,6 +15,11 @@ import {
   rollDiceServerSide,
   submitAnswerServerSide,
 } from '@prl-oca/shared';
+import {
+  isLocalFallbackEnabled,
+  resolveApiBaseUrl,
+  resolveWebSocketUrl,
+} from '../apps/web/src/utils/networkConfig';
 
 describe('PRL-OCA 3D - Tablero de 48 Casillas, Contenidos y Motor Autoritativo', () => {
   it('verifica que el tablero tiene exactamente 48 casillas tridimensionales y 12 zonas', () => {
@@ -201,5 +206,40 @@ describe('PRL-OCA 3D - Tablero de 48 Casillas, Contenidos y Motor Autoritativo',
       playerName: 'Lucía Moreno',
     });
     expect(thirdUser.ok).toBe(false);
+  });
+
+  it('fuerza HTTPS y WSS en producción sobre Cloudflare Pages y respeta VITE_ENABLE_LOCAL_FALLBACK', () => {
+    const pagesLoc = { protocol: 'https:', hostname: 'prl-oca-3d.pages.dev' };
+
+    expect(
+      resolveWebSocketUrl(
+        'prl123',
+        { VITE_API_URL: 'https://prl-oca-realtime.mi-cuenta.workers.dev' },
+        pagesLoc
+      )
+    ).toBe('wss://prl-oca-realtime.mi-cuenta.workers.dev/ws/PRL123');
+
+    expect(
+      resolveWebSocketUrl(
+        'prl123',
+        { VITE_WS_URL: 'ws://prl-oca-realtime.mi-cuenta.workers.dev' },
+        pagesLoc
+      )
+    ).toBe('wss://prl-oca-realtime.mi-cuenta.workers.dev/ws/PRL123');
+
+    expect(
+      resolveApiBaseUrl(
+        { VITE_API_URL: 'http://prl-oca-realtime.mi-cuenta.workers.dev/' },
+        pagesLoc
+      )
+    ).toBe('https://prl-oca-realtime.mi-cuenta.workers.dev');
+
+    expect(resolveWebSocketUrl('prl123', {}, pagesLoc)).toBeNull();
+    expect(
+      resolveWebSocketUrl('prl123', {}, { protocol: 'http:', hostname: 'localhost' })
+    ).toBe('ws://localhost:8787/ws/PRL123');
+
+    expect(isLocalFallbackEnabled({ VITE_ENABLE_LOCAL_FALLBACK: 'false' })).toBe(false);
+    expect(isLocalFallbackEnabled({})).toBe(true);
   });
 });

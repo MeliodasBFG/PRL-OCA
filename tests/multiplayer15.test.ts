@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ServerToClientMessage } from '@prl-oca/shared';
 import { GameRoom } from '../apps/realtime/src/durable-objects/GameRoom';
+import {
+  buildCorsHeaders,
+  createTeacherToken,
+  isOriginAllowed,
+  verifyTeacherToken,
+} from '../apps/realtime/src/security/auth';
 
 /**
  * Mock de DurableObjectState y WebSocket para simular 15 participantes simultáneos,
@@ -255,5 +261,34 @@ describe('Simulación Multijugador en Tiempo Real: 15 Participantes (3 Equipos �
       const p3 = afterStaleClose.state.players.find((p) => p.id === 'player_3');
       expect(p3?.connected).toBe(true);
     }
+  });
+
+  it('valida CORS multipruebas (pages.dev / previews), origen WebSocket seguro y firma con secreto docente', () => {
+    const allowedPattern = 'https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev';
+
+    expect(isOriginAllowed('https://prl-oca-3d.pages.dev', allowedPattern, 'production')).toBe(true);
+    expect(
+      isOriginAllowed('https://development.prl-oca-3d.pages.dev', allowedPattern, 'production')
+    ).toBe(true);
+    expect(
+      isOriginAllowed('https://evil-prl-oca-3d.pages.dev', allowedPattern, 'production')
+    ).toBe(false);
+    expect(isOriginAllowed('http://localhost:5173', allowedPattern, 'production')).toBe(false);
+    expect(isOriginAllowed('http://localhost:5173', allowedPattern, 'development')).toBe(true);
+
+    const corsHeaders = buildCorsHeaders(
+      allowedPattern,
+      'https://development.prl-oca-3d.pages.dev',
+      'production'
+    );
+    expect(corsHeaders['Access-Control-Allow-Origin']).toBe(
+      'https://development.prl-oca-3d.pages.dev'
+    );
+    expect(corsHeaders.Vary).toBe('Origin');
+
+    const token = createTeacherToken('PRL123', 'pinClase1', 'superSecretKey');
+    expect(verifyTeacherToken(token, 'PRL123', 'pinClase1', 'superSecretKey')).toBe(true);
+    expect(verifyTeacherToken(token, 'PRL123', 'pinClase1', 'wrongSecret')).toBe(false);
+    expect(verifyTeacherToken('pinClase1', 'PRL123', 'pinClase1', 'superSecretKey')).toBe(false);
   });
 });

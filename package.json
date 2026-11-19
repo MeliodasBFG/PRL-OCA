@@ -13,6 +13,7 @@
     "build": "npm run build --workspace=@prl-oca/shared && npm run build --workspace=@prl-oca/web && npm run build --workspace=@prl-oca/realtime",
     "build:web": "npm run build --workspace=@prl-oca/shared && npm run build --workspace=@prl-oca/web",
     "build:realtime": "npm run build --workspace=@prl-oca/shared && npm run build --workspace=@prl-oca/realtime",
+    "deploy:realtime": "wrangler deploy --config apps/realtime/wrangler.jsonc --env production",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",
     "test:watch": "vitest"

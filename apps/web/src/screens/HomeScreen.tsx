@@ -30,7 +30,8 @@ export const HomeScreen: React.FC = () => {
   const [showSoloPrompt, setShowSoloPrompt] = useState(false);
   const [soloName, setSoloName] = useState('Especialista PRL');
   const [showTeacherUnlock, setShowTeacherUnlock] = useState(false);
-  const [pinInput, setPinInput] = useState('PRL2026');
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
 
   const handleFirstAudioInteraction = () => {
     soundEngine.unlockAudio();
@@ -164,21 +165,37 @@ export const HomeScreen: React.FC = () => {
               <input
                 type="password"
                 value={pinInput}
-                onChange={(e) => setPinInput(e.target.value)}
-                placeholder="Clave docente (ej. PRL2026)"
+                onChange={(e) => {
+                  setPinInput(e.target.value);
+                  if (pinError) setPinError('');
+                }}
+                placeholder="Clave docente (mín. 4 caracteres)"
                 aria-label="Clave de acceso docente"
               />
               <button
                 type="button"
                 className="btn-primary"
                 onClick={() => {
-                  if (pinInput.trim().length >= 4) {
+                  const configuredPin = (
+                    import.meta.env.VITE_TEACHER_ACCESS_PIN as string | undefined
+                  )?.trim();
+                  const entered = pinInput.trim();
+                  if (configuredPin) {
+                    if (entered === configuredPin) {
+                      setScreen('question_editor');
+                    } else {
+                      setPinError('Clave docente incorrecta.');
+                    }
+                  } else if (entered.length >= 4) {
                     setScreen('question_editor');
+                  } else {
+                    setPinError('Introduce al menos 4 caracteres.');
                   }
                 }}
               >
                 <BookOpen size={15} /> Abrir Editor de Contenidos
               </button>
+              {pinError && <small style={{ color: '#fda4af', width: '100%' }}>{pinError}</small>}
             </div>
           )}
         </div>

@@ -42,14 +42,14 @@ jobs:
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL }}
           VITE_WS_URL: ${{ vars.VITE_WS_URL }}
+          VITE_ENABLE_LOCAL_FALLBACK: ${{ vars.VITE_ENABLE_LOCAL_FALLBACK }}
 
       - name: Desplegar Backend Worker + Durable Objects (prl-oca-realtime)
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: apps/realtime
-          command: deploy --env ${{ inputs.environment }}
+          command: deploy --config apps/realtime/wrangler.jsonc --env ${{ inputs.environment }}
 
       - name: Desplegar Frontend en Cloudflare Pages
         uses: cloudflare/wrangler-action@v3

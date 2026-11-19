@@ -1,0 +1,4 @@
+# Plantilla de secretos locales para `npx wrangler dev` (nunca subas `.dev.vars` a Git)
+# Copia este archivo a `apps/realtime/.dev.vars` si quieres probar secretos localmente.
+TEACHER_TOKEN_SECRET=cambia-esta-clave-secreta-local
+TEACHER_ADMIN_SECRET=cambia-esta-clave-admin-local

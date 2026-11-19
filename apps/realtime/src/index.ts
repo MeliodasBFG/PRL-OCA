@@ -3,7 +3,7 @@ import {
   QuestionItemSchema,
 } from '@prl-oca/shared';
 import { Env, GameRoom } from './durable-objects/GameRoom';
-import { buildCorsHeaders } from './security/auth';
+import { buildCorsHeaders, isOriginAllowed } from './security/auth';
 import { DatabaseService } from './services/db';
 
 export { GameRoom };
@@ -20,10 +20,25 @@ function generateRoomCode(): string {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const cors = buildCorsHeaders(env.ALLOWED_ORIGIN ?? '*');
+    const requestOrigin = request.headers.get('Origin');
+    const cors = buildCorsHeaders(
+      env.ALLOWED_ORIGIN ?? '*',
+      requestOrigin,
+      env.ENVIRONMENT ?? 'development'
+    );
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: cors });
+    }
+
+    if (
+      requestOrigin &&
+      !isOriginAllowed(requestOrigin, env.ALLOWED_ORIGIN ?? '*', env.ENVIRONMENT ?? 'development')
+    ) {
+      return new Response(JSON.stringify({ ok: false, error: 'Origen no permitido por CORS.' }), {
+        status: 403,
+        headers: { ...cors, 'Content-Type': 'application/json' },
+      });
     }
 
     const db = new DatabaseService(env.DB);
@@ -110,6 +125,16 @@ export default {
         });
       }
       if (request.method === 'POST') {
+        if (env.TEACHER_ADMIN_SECRET) {
+          const authHeader = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '').trim();
+          const secretHeader = request.headers.get('X-Teacher-Secret')?.trim();
+          if (authHeader !== env.TEACHER_ADMIN_SECRET && secretHeader !== env.TEACHER_ADMIN_SECRET) {
+            return new Response(
+              JSON.stringify({ ok: false, error: 'Credencial administrativa requerida.' }),
+              { status: 401, headers: { ...cors, 'Content-Type': 'application/json' } }
+            );
+          }
+        }
         const raw = await request.json().catch(() => ({}));
         const parsed = QuestionItemSchema.safeParse(raw);
         if (!parsed.success) {

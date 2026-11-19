@@ -82,7 +82,7 @@ export const GameConfigSchema = z.object({
 
 export const CreateRoomRequestSchema = z.object({
   config: GameConfigSchema.partial().optional(),
-  teacherPin: z.string().min(4).max(32).default('PRL2026'),
+  teacherPin: z.string().min(4).max(32),
   teacherName: z.string().min(2).max(40).default('Docente PRL'),
 });
 

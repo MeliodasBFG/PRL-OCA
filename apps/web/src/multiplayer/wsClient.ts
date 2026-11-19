@@ -3,6 +3,7 @@ import {
   GameRoomState,
   ServerToClientMessage,
 } from '@prl-oca/shared';
+import { resolveWebSocketUrl } from '../utils/networkConfig';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'local_sync';
 
@@ -44,9 +45,11 @@ export class MultiplayerClient {
   }
 
   private openWebSocket(): void {
-    const wsBase =
-      (import.meta.env.VITE_WS_URL as string | undefined) || 'ws://localhost:8787';
-    const wsUrl = `${wsBase.replace(/\/$/, '')}/ws/${this.roomCode}`;
+    const wsUrl = resolveWebSocketUrl(this.roomCode);
+    if (!wsUrl) {
+      this.onStatusCallback?.('local_sync');
+      return;
+    }
 
     this.onStatusCallback?.('connecting');
 

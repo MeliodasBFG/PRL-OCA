@@ -1,5 +1,5 @@
 /**
- * Security utilities: short-lived teacher tokens, rate limiting, and CORS headers.
+ * Security utilities: short-lived teacher tokens, rate limiting, and production CORS/Origin checks.
  */
 
 export interface TeacherTokenPayload {
@@ -11,29 +11,34 @@ export interface TeacherTokenPayload {
 
 const TOKEN_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours session TTL
 
-export function createTeacherToken(roomCode: string, secretPin: string): string {
+export function createTeacherToken(
+  roomCode: string,
+  secretPin: string,
+  serverSecret = ''
+): string {
   const issuedAt = Date.now();
   const expiresAt = issuedAt + TOKEN_TTL_MS;
   const raw = `${roomCode.toUpperCase()}:${issuedAt}:${expiresAt}`;
-  const sig = simpleHash(`${raw}:${secretPin}`);
+  const sig = simpleHash(`${raw}:${secretPin}:${serverSecret}`);
   return `${raw}:${sig}`;
 }
 
 export function verifyTeacherToken(
   token: string | undefined,
   roomCode: string,
-  secretPin: string
+  secretPin: string,
+  serverSecret = ''
 ): boolean {
   if (!token) return false;
-  // Also allow direct PIN match if teacher passes PIN directly in local mode
-  if (token === secretPin) return true;
+  // Local fallback compatibility when room uses direct PIN matching without server secret
+  if (!serverSecret && token === secretPin) return true;
   const parts = token.split(':');
   if (parts.length !== 4) return false;
   const [tRoom, issuedStr, expiresStr, sig] = parts;
   if (tRoom !== roomCode.toUpperCase()) return false;
   const expiresAt = Number(expiresStr);
   if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) return false;
-  const expectedSig = simpleHash(`${tRoom}:${issuedStr}:${expiresStr}:${secretPin}`);
+  const expectedSig = simpleHash(`${tRoom}:${issuedStr}:${expiresStr}:${secretPin}:${serverSecret}`);
   return sig === expectedSig;
 }
 
@@ -73,11 +78,80 @@ export class RateLimiter {
   }
 }
 
-export function buildCorsHeaders(allowedOrigin = '*'): Record<string, string> {
+function matchesOriginPattern(origin: string, pattern: string): boolean {
+  if (pattern === '*') return true;
+  const cleanPattern = pattern.trim().replace(/\/$/, '');
+  const cleanOrigin = origin.trim().replace(/\/$/, '');
+  if (!cleanPattern || !cleanOrigin) return false;
+  if (cleanOrigin === cleanPattern) return true;
+
+  // Support subdomain wildcards such as https://*.prl-oca-3d.pages.dev or https://*.pages.dev
+  if (cleanPattern.includes('*.')) {
+    try {
+      const originUrl = new URL(cleanOrigin);
+      const wildcardPrefix = cleanPattern.split('*.')[0];
+      const wildcardSuffix = cleanPattern.slice(wildcardPrefix.length + 2);
+      if (!cleanPattern.startsWith(`${originUrl.protocol}//`)) return false;
+      const host = originUrl.hostname.toLowerCase();
+      const targetSuffix = wildcardSuffix.toLowerCase();
+      return host === targetSuffix || host.endsWith(`.${targetSuffix}`);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export function isOriginAllowed(
+  requestOrigin: string | null,
+  configuredOrigin = '*',
+  environment = 'development'
+): boolean {
+  if (!requestOrigin) return true;
+  if (configuredOrigin.trim() === '*') return true;
+
+  // Always allow localhost / 127.0.0.1 in non-production environments
+  if (environment !== 'production') {
+    try {
+      const url = new URL(requestOrigin);
+      if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  const patterns = configuredOrigin
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return patterns.some((p) => matchesOriginPattern(requestOrigin, p));
+}
+
+export function buildCorsHeaders(
+  configuredOrigin = '*',
+  requestOrigin: string | null = null,
+  environment = 'development'
+): Record<string, string> {
+  let allowHeader = '*';
+  if (configuredOrigin.trim() !== '*') {
+    const patterns = configuredOrigin
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (requestOrigin && isOriginAllowed(requestOrigin, configuredOrigin, environment)) {
+      allowHeader = requestOrigin;
+    } else {
+      allowHeader = patterns[0] ?? 'https://prl-oca-3d.pages.dev';
+    }
+  }
+
   return {
-    'Access-Control-Allow-Origin': allowedOrigin,
+    'Access-Control-Allow-Origin': allowHeader,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Teacher-Token',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Teacher-Token, X-Teacher-Secret',
     'Access-Control-Max-Age': '86400',
+    Vary: 'Origin',
   };
 }

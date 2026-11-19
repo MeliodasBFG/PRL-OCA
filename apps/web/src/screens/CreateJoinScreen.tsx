@@ -17,7 +17,9 @@ export const CreateJoinScreen: React.FC = () => {
   // Create Room Form State (Default: 15 participants in 3 teams of 5)
   const [roomName, setRoomName] = useState('Formación PRL · Grupo Principal');
   const [teacherName, setTeacherName] = useState('Docente PRL');
-  const [teacherPin, setTeacherPin] = useState('PRL2026');
+  const [teacherPin, setTeacherPin] = useState(
+    () => `DOC${Math.floor(100 + Math.random() * 900)}`
+  );
   const [mode, setMode] = useState<'teams' | 'individual'>('teams');
   const [teamCount, setTeamCount] = useState<number>(3);
   const [maxPlayers, setMaxPlayers] = useState<number>(15);
@@ -286,7 +288,7 @@ export const CreateJoinScreen: React.FC = () => {
                     required
                     value={joinTeacherPin}
                     onChange={(e) => setJoinTeacherPin(e.target.value)}
-                    placeholder="PRL2026"
+                    placeholder="Introduce la clave de la sala"
                   />
                 </label>
               )}

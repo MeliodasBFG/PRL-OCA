@@ -1,8 +1,9 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "prl-oca-realtime",
   "main": "src/index.ts",
   "compatibility_date": "2025-01-01",
+  "workers_dev": true,
   "vars": {
     "ALLOWED_ORIGIN": "*",
     "ENVIRONMENT": "development"
@@ -29,7 +30,8 @@
       "migrations_dir": "../../migrations"
     }
   ],
-  // Descomenta el bloque r2_buckets cuando crees el bucket R2 opcional para modelos GLB externos:
+  // Nota: actualmente todos los modelos 3D, texturas y sonidos son procedurales (no requiere R2).
+  // Descomenta este bloque únicamente si en el futuro subes modelos GLB externos a Cloudflare R2:
   // "r2_buckets": [
   //   {
   //     "binding": "ASSETS_BUCKET",
@@ -39,6 +41,7 @@
   "env": {
     "preview": {
       "name": "prl-oca-realtime-preview",
+      "workers_dev": true,
       "vars": {
         "ALLOWED_ORIGIN": "*",
         "ENVIRONMENT": "preview"
@@ -50,12 +53,21 @@
             "class_name": "GameRoom"
           }
         ]
-      }
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "prl-oca-db",
+          "database_id": "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID",
+          "migrations_dir": "../../migrations"
+        }
+      ]
     },
     "production": {
       "name": "prl-oca-realtime",
+      "workers_dev": true,
       "vars": {
-        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev",
+        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev",
         "ENVIRONMENT": "production"
       },
       "durable_objects": {
@@ -65,7 +77,15 @@
             "class_name": "GameRoom"
           }
         ]
-      }
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "prl-oca-db",
+          "database_id": "REPLACE_WITH_YOUR_CLOUDFLARE_D1_DATABASE_ID",
+          "migrations_dir": "../../migrations"
+        }
+      ]
     }
   }
 }

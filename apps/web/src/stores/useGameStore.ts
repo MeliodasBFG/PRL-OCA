@@ -22,6 +22,7 @@ import {
 import { ConnectionState, mpClient } from '../multiplayer/wsClient';
 import { soundEngine } from '../audio/SoundEngine';
 import { enterGameLandscapeMode, exitGameLandscapeMode } from '../utils/mobileOrientation';
+import { isLocalFallbackEnabled, resolveApiBaseUrl } from '../utils/networkConfig';
 
 export type AppScreen =
   | 'home'
@@ -418,8 +419,8 @@ export const useGameStore = create<GameStore>((set, get) => {
     isTeacher: false,
     isSpectator: false,
     projectorMode: false,
-    teacherPin: 'PRL2026',
-    teacherToken: 'PRL2026',
+    teacherPin: '',
+    teacherToken: '',
     errorMessage: null,
     captionToast: null,
 
@@ -530,37 +531,51 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.unlockAudio();
       soundEngine.playSfx('menu_open');
 
-      const apiBase =
-        (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:8787';
+      const apiBase = resolveApiBaseUrl();
+      const allowLocalFallback = isLocalFallbackEnabled();
+      const cleanTeacherPin =
+        teacherPin.trim() || `DOC${Math.floor(100 + Math.random() * 900)}`;
       let roomCode = `PRL${Math.floor(100 + Math.random() * 900)}`;
       let initialState = createInitialRoomState(roomCode, config);
-      let token = teacherPin || 'PRL2026';
+      let token = cleanTeacherPin;
+      let createdOnServer = false;
 
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1800);
-        const res = await fetch(`${apiBase.replace(/\/$/, '')}/api/rooms`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ config, teacherPin, teacherName }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          const data = (await res.json()) as {
-            ok: boolean;
-            roomCode: string;
-            teacherToken: string;
-            state: GameRoomState;
-          };
-          if (data.ok && data.roomCode) {
-            roomCode = data.roomCode;
-            initialState = data.state;
-            token = data.teacherToken;
+      if (apiBase) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 5500);
+          const res = await fetch(`${apiBase}/api/rooms`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config, teacherPin: cleanTeacherPin, teacherName }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          if (res.ok) {
+            const data = (await res.json()) as {
+              ok: boolean;
+              roomCode: string;
+              teacherToken: string;
+              state: GameRoomState;
+            };
+            if (data.ok && data.roomCode) {
+              roomCode = data.roomCode;
+              initialState = data.state;
+              token = data.teacherToken;
+              createdOnServer = true;
+            }
           }
+        } catch {
+          // Handled below according to VITE_ENABLE_LOCAL_FALLBACK
         }
-      } catch {
-        // Offline local fallback
+      }
+
+      if (!createdOnServer && !allowLocalFallback) {
+        set({
+          errorMessage:
+            'No se pudo conectar con el servidor Cloudflare Workers para crear la sala multijugador.',
+        });
+        return;
       }
 
       const playerId = get().playerId;
@@ -579,7 +594,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         playerName: teacherDisplayName,
         isTeacher: true,
         isSpectator: false,
-        teacherPin: teacherPin || 'PRL2026',
+        teacherPin: cleanTeacherPin,
         teacherToken: token,
         screen: 'lobby',
         errorMessage: null,
@@ -595,7 +610,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           playerId: resolvedPlayerId,
           playerName: teacherDisplayName,
           isTeacher: true,
-          teacherPin: teacherPin || 'PRL2026',
+          teacherPin: cleanTeacherPin,
         },
         (msg: ServerToClientMessage) => handleServerMessage(msg),
         (status) => set({ connectionStatus: status })
@@ -620,25 +635,37 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const apiBase =
-        (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:8787';
-      let state = mpClient.loadCachedRoomState(cleanCode);
+      const apiBase = resolveApiBaseUrl();
+      const allowLocalFallback = isLocalFallbackEnabled();
+      let state = allowLocalFallback ? mpClient.loadCachedRoomState(cleanCode) : null;
+      let loadedFromServer = false;
 
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1800);
-        const res = await fetch(`${apiBase.replace(/\/$/, '')}/api/rooms/${cleanCode}`, {
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          const data = (await res.json()) as { ok: boolean; state: GameRoomState };
-          if (data.ok && data.state) {
-            state = data.state;
+      if (apiBase) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 5500);
+          const res = await fetch(`${apiBase}/api/rooms/${cleanCode}`, {
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          if (res.ok) {
+            const data = (await res.json()) as { ok: boolean; state: GameRoomState };
+            if (data.ok && data.state) {
+              state = data.state;
+              loadedFromServer = true;
+            }
           }
+        } catch {
+          // Handled below according to VITE_ENABLE_LOCAL_FALLBACK
         }
-      } catch {
-        // Fallback
+      }
+
+      if (!loadedFromServer && !allowLocalFallback) {
+        set({
+          errorMessage:
+            'No se pudo conectar con la sala en el servidor Cloudflare Workers. Verifica la URL del backend o el código de sala.',
+        });
+        return;
       }
 
       if (!state) {
