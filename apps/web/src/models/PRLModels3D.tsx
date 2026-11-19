@@ -277,20 +277,20 @@ export const BIEFireCabinet3D: React.FC<{
   scale?: number;
 }> = ({ position = [0, 0, 0], scale = 1 }) => (
   <group position={position} scale={scale}>
-    <RoundedBox args={[0.85, 0.85, 0.24]} radius={0.04} position={[0, 0.5, 0]} castShadow>
+    <RoundedBox args={[0.85, 0.85, 0.24]} radius={0.04} position={[0, 0.425, 0]} castShadow>
       <meshStandardMaterial color="#DC2626" metalness={0.4} roughness={0.3} />
     </RoundedBox>
     {/* Ventana cristal */}
-    <mesh position={[0, 0.5, 0.125]}>
+    <mesh position={[0, 0.425, 0.125]}>
       <planeGeometry args={[0.66, 0.66]} />
       <meshStandardMaterial color="#0F172A" roughness={0.2} />
     </mesh>
     {/* Devanadera y manguera enrollada interior */}
-    <mesh position={[0, 0.5, 0.13]} rotation={[Math.PI / 2, 0, 0]}>
+    <mesh position={[0, 0.425, 0.13]} rotation={[Math.PI / 2, 0, 0]}>
       <cylinderGeometry args={[0.24, 0.24, 0.05, 20]} />
       <meshStandardMaterial color="#EF4444" />
     </mesh>
-    <mesh position={[0, 0.5, 0.16]}>
+    <mesh position={[0, 0.425, 0.16]}>
       <torusGeometry args={[0.14, 0.035, 10, 20]} />
       <meshStandardMaterial color="#F8FAFC" />
     </mesh>
@@ -302,7 +302,16 @@ export const SafetySign3D: React.FC<{
   position?: [number, number, number];
   rotation?: [number, number, number];
   scale?: number;
-}> = ({ kind, position = [0, 0, 0], rotation = [0, 0, 0], scale = 1 }) => {
+  withPost?: boolean;
+  postHeight?: number;
+}> = ({
+  kind,
+  position = [0, 0, 0],
+  rotation = [0, 0, 0],
+  scale = 1,
+  withPost = false,
+  postHeight = 1.0,
+}) => {
   const texture = useMemo(() => {
     switch (kind) {
       case 'warning':
@@ -331,6 +340,18 @@ export const SafetySign3D: React.FC<{
         <planeGeometry args={[0.66, 0.66]} />
         <meshBasicMaterial map={texture} transparent />
       </mesh>
+      {withPost && (
+        <group>
+          <mesh position={[0, -postHeight / 2, -0.02]} castShadow>
+            <cylinderGeometry args={[0.04, 0.04, postHeight, 12]} />
+            <meshStandardMaterial color="#94A3B8" metalness={0.75} roughness={0.3} />
+          </mesh>
+          <mesh position={[0, -postHeight + 0.025, -0.02]} receiveShadow castShadow>
+            <cylinderGeometry args={[0.24, 0.28, 0.05, 18]} />
+            <meshStandardMaterial color="#1E293B" metalness={0.6} roughness={0.4} />
+          </mesh>
+        </group>
+      )}
     </group>
   );
 };
@@ -431,7 +452,11 @@ export const GasCylinder3D: React.FC<{
   position?: [number, number, number];
   scale?: number;
 }> = ({ chained = false, position = [0, 0, 0], scale = 1 }) => (
-  <group position={position} scale={scale} rotation={chained ? [0, 0, 0] : [0.08, 0, -0.14]}>
+  <group position={position} scale={scale} rotation={chained ? [0, 0, 0] : [0.04, 0, -0.1]}>
+    <mesh position={[0, 0.04, 0]} castShadow>
+      <cylinderGeometry args={[0.2, 0.21, 0.08, 20]} />
+      <meshStandardMaterial color="#1E293B" metalness={0.6} roughness={0.4} />
+    </mesh>
     <mesh position={[0, 0.58, 0]} castShadow>
       <cylinderGeometry args={[0.18, 0.18, 1.05, 20]} />
       <meshStandardMaterial color="#0284C7" metalness={0.5} roughness={0.3} />
@@ -461,28 +486,33 @@ export const PalletRack3D: React.FC<{
   scale?: number;
 }> = ({ bentPost = false, overhangingTop = false, position = [0, 0, 0], scale = 1 }) => (
   <group position={position} scale={scale}>
-    {/* 4 puntales azules */}
+    {/* 4 puntales azules con placas de anclaje al suelo */}
     {[
       [-0.9, 1.05, -0.42, false],
       [0.9, 1.05, -0.42, false],
       [-0.9, 1.05, 0.42, false],
       [0.9, 1.05, 0.42, bentPost],
     ].map(([x, y, z, isBent], idx) => (
-      <mesh
-        key={idx}
-        position={[Number(x), Number(y), Number(z)]}
-        rotation={isBent ? [0, 0, 0.18] : [0, 0, 0]}
-        castShadow
-      >
-        <boxGeometry args={[0.09, 2.1, 0.09]} />
-        <meshStandardMaterial
-          color={isBent ? '#EF4444' : '#0284C7'}
-          emissive={isBent ? '#DC2626' : '#000000'}
-          emissiveIntensity={isBent ? 0.35 : 0}
-          metalness={0.55}
-          roughness={0.35}
-        />
-      </mesh>
+      <group key={idx}>
+        <mesh position={[Number(x), 0.02, Number(z)]} receiveShadow>
+          <boxGeometry args={[0.18, 0.04, 0.18]} />
+          <meshStandardMaterial color="#FFB800" metalness={0.5} roughness={0.4} />
+        </mesh>
+        <mesh
+          position={[Number(x), Number(y), Number(z)]}
+          rotation={isBent ? [0, 0, 0.18] : [0, 0, 0]}
+          castShadow
+        >
+          <boxGeometry args={[0.09, 2.1, 0.09]} />
+          <meshStandardMaterial
+            color={isBent ? '#EF4444' : '#0284C7'}
+            emissive={isBent ? '#DC2626' : '#000000'}
+            emissiveIntensity={isBent ? 0.35 : 0}
+            metalness={0.55}
+            roughness={0.35}
+          />
+        </mesh>
+      </group>
     ))}
 
     {/* Largueros naranjas horizontales */}
@@ -811,11 +841,11 @@ export const LabFlask3D: React.FC<{
   scale?: number;
 }> = ({ position = [0, 0, 0], scale = 1 }) => (
   <group position={position} scale={scale}>
-    <mesh position={[0, 0.14, 0]} castShadow>
+    <mesh position={[0, 0.16, 0]} castShadow>
       <coneGeometry args={[0.24, 0.32, 20]} />
       <meshStandardMaterial color="#06B6D4" emissive="#0891B2" emissiveIntensity={0.45} transparent opacity={0.85} />
     </mesh>
-    <mesh position={[0, 0.34, 0]}>
+    <mesh position={[0, 0.36, 0]}>
       <cylinderGeometry args={[0.06, 0.07, 0.18, 16]} />
       <meshStandardMaterial color="#E2E8F0" transparent opacity={0.75} />
     </mesh>

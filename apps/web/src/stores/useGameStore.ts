@@ -309,6 +309,80 @@ export const useGameStore = create<GameStore>((set, get) => {
     }, estimatedWalkMs);
   };
 
+  const persistFinishedMatchHistory = (finishedState: GameRoomState) => {
+    if (finishedState.status !== 'finished') return;
+    const existing = get().matchHistory;
+    const alreadySaved = existing.some(
+      (m) =>
+        m.roomCode === finishedState.roomCode &&
+        Math.abs(m.finishedAt - finishedState.updatedAt) < 10000
+    );
+    if (alreadySaved) return;
+    const record = buildMatchHistoryFromState(finishedState);
+    const updatedHistory = [record, ...existing].slice(0, 50);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory));
+    }
+    set({ matchHistory: updatedHistory });
+  };
+
+  const handleServerMessage = (msg: ServerToClientMessage) => {
+    if (msg.type === 'STATE_SYNC') {
+      const prevRollTs = get().roomState?.lastDiceRoll?.timestamp ?? 0;
+      const incomingRollTs = msg.state.lastDiceRoll?.timestamp ?? 0;
+      const hasNewRollFromSync =
+        incomingRollTs > prevRollTs && msg.state.phase === 'answering';
+
+      const nextScreen =
+        msg.state.status === 'finished'
+          ? 'victory'
+          : msg.state.status === 'playing' || msg.state.status === 'paused'
+          ? 'game'
+          : 'lobby';
+
+      if (msg.state.status === 'finished') {
+        soundEngine.playSfx('victory_fanfare');
+        soundEngine.playMusic('victory');
+        persistFinishedMatchHistory(msg.state);
+      } else if (hasNewRollFromSync) {
+        soundEngine.playSfx('dice_hit');
+      }
+
+      set({
+        roomState: msg.state,
+        teacherToken: msg.teacherToken ?? get().teacherToken,
+        screen: nextScreen,
+      });
+    } else if (msg.type === 'DICE_ROLLED') {
+      soundEngine.playSfx('dice_hit');
+      set({
+        roomState: msg.state,
+        isRollingAnimation: false,
+        isTokenMoving: true,
+        challengeModalReady: false,
+      });
+      scheduleMovementSequence(msg.state);
+    } else if (msg.type === 'ANSWER_RESULT') {
+      soundEngine.playSfx(msg.isCorrect ? 'answer_correct' : 'answer_wrong');
+      if (msg.unlockedBadges.length > 0) {
+        setTimeout(() => soundEngine.playSfx('badge_unlock'), 350);
+      }
+      if (msg.state.status === 'finished') {
+        soundEngine.playSfx('victory_fanfare');
+        soundEngine.playMusic('victory');
+        persistFinishedMatchHistory(msg.state);
+      }
+      set({
+        roomState: msg.state,
+        screen: msg.state.status === 'finished' ? 'victory' : 'game',
+        isTokenMoving: false,
+        challengeModalReady: true,
+      });
+    } else if (msg.type === 'ERROR') {
+      set({ errorMessage: msg.message });
+    }
+  };
+
   return {
     screen: 'home',
     createJoinTab: 'create',
@@ -495,43 +569,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           isTeacher: true,
           teacherPin: teacherPin || 'PRL2026',
         },
-        (msg: ServerToClientMessage) => {
-          if (msg.type === 'STATE_SYNC') {
-            const nextScreen =
-              msg.state.status === 'finished'
-                ? 'victory'
-                : msg.state.status === 'playing' || msg.state.status === 'paused'
-                ? 'game'
-                : 'lobby';
-            set({
-              roomState: msg.state,
-              teacherToken: msg.teacherToken ?? get().teacherToken,
-              screen: nextScreen,
-            });
-          } else if (msg.type === 'DICE_ROLLED') {
-            soundEngine.playSfx('dice_hit');
-            set({
-              roomState: msg.state,
-              isRollingAnimation: false,
-              isTokenMoving: true,
-              challengeModalReady: false,
-            });
-            scheduleMovementSequence(msg.state);
-          } else if (msg.type === 'ANSWER_RESULT') {
-            soundEngine.playSfx(msg.isCorrect ? 'answer_correct' : 'answer_wrong');
-            if (msg.unlockedBadges.length > 0) {
-              setTimeout(() => soundEngine.playSfx('badge_unlock'), 350);
-            }
-            set({
-              roomState: msg.state,
-              screen: msg.state.status === 'finished' ? 'victory' : 'game',
-              isTokenMoving: false,
-              challengeModalReady: true,
-            });
-          } else if (msg.type === 'ERROR') {
-            set({ errorMessage: msg.message });
-          }
-        },
+        (msg: ServerToClientMessage) => handleServerMessage(msg),
         (status) => set({ connectionStatus: status })
       );
     },
@@ -622,40 +660,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           isSpectator,
           teacherPin,
         },
-        (msg) => {
-          if (msg.type === 'STATE_SYNC') {
-            const nextScreen =
-              msg.state.status === 'finished'
-                ? 'victory'
-                : msg.state.status === 'playing' || msg.state.status === 'paused'
-                ? 'game'
-                : 'lobby';
-            set({
-              roomState: msg.state,
-              teacherToken: msg.teacherToken ?? get().teacherToken,
-              screen: nextScreen,
-            });
-          } else if (msg.type === 'DICE_ROLLED') {
-            soundEngine.playSfx('dice_hit');
-            set({
-              roomState: msg.state,
-              isRollingAnimation: false,
-              isTokenMoving: true,
-              challengeModalReady: false,
-            });
-            scheduleMovementSequence(msg.state);
-          } else if (msg.type === 'ANSWER_RESULT') {
-            soundEngine.playSfx(msg.isCorrect ? 'answer_correct' : 'answer_wrong');
-            set({
-              roomState: msg.state,
-              screen: msg.state.status === 'finished' ? 'victory' : 'game',
-              isTokenMoving: false,
-              challengeModalReady: true,
-            });
-          } else if (msg.type === 'ERROR') {
-            set({ errorMessage: msg.message });
-          }
-        },
+        (msg) => handleServerMessage(msg),
         (status) => set({ connectionStatus: status })
       );
     },

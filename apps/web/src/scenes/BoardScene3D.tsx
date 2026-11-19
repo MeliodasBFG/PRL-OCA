@@ -93,8 +93,8 @@ const CameraController: React.FC<{
         );
         break;
       case 'dice':
-        desiredPos.current.set(0, 8.8, 12.2);
-        desiredTarget.current.set(0, 1.9, 4.2);
+        desiredPos.current.set(1.5, 8.6, 12.6);
+        desiredTarget.current.set(1.5, 2.0, 5.5);
         break;
       case 'teams':
         desiredPos.current.set(-16, 15, 22);
@@ -250,7 +250,7 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
           />
         ))}
 
-        <Dice3D diceValues={diceValues} isRolling={isRolling} position={[0, 2.3, 4.2]} />
+        <Dice3D diceValues={diceValues} isRolling={isRolling} position={[1.5, 2.32, 5.5]} />
 
         {graphicsQuality !== 'baja' && !reducedMotion && (
           <Sparkles

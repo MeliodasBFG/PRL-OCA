@@ -26,9 +26,9 @@ export const Mascot3D: React.FC<Mascot3DProps> = ({
   useFrame(({ clock }) => {
     const t = clock.getElapsedTime();
     if (groupRef.current) {
-      const floatSpeed = mood === 'celebrate' ? 6 : 2.5;
-      const floatAmp = mood === 'celebrate' ? 0.18 : 0.08;
-      groupRef.current.position.y = position[1] + Math.sin(t * floatSpeed) * floatAmp;
+      const floatSpeed = mood === 'celebrate' ? 5.5 : 2.2;
+      const floatAmp = mood === 'celebrate' ? 0.16 : 0.045;
+      groupRef.current.position.y = position[1] + Math.abs(Math.sin(t * floatSpeed)) * floatAmp;
       groupRef.current.rotation.y =
         mood === 'celebrate' ? t * 2.2 : Math.sin(t * 1.1) * 0.25;
     }
@@ -164,11 +164,11 @@ export const Mascot3D: React.FC<Mascot3DProps> = ({
         </mesh>
       </group>
 
-      {/* Botas de seguridad S3 */}
-      <RoundedBox args={[0.24, 0.22, 0.36]} radius={0.05} position={[-0.2, 0.16, 0.05]} castShadow>
+      {/* Botas de seguridad S3 apoyadas a ras de y = 0 */}
+      <RoundedBox args={[0.24, 0.22, 0.36]} radius={0.05} position={[-0.2, 0.11, 0.05]} castShadow>
         <meshStandardMaterial color="#1E293B" metalness={0.4} roughness={0.6} />
       </RoundedBox>
-      <RoundedBox args={[0.24, 0.22, 0.36]} radius={0.05} position={[0.2, 0.16, 0.05]} castShadow>
+      <RoundedBox args={[0.24, 0.22, 0.36]} radius={0.05} position={[0.2, 0.11, 0.05]} castShadow>
         <meshStandardMaterial color="#1E293B" metalness={0.4} roughness={0.6} />
       </RoundedBox>
     </group>

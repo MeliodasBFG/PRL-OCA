@@ -271,21 +271,22 @@ export const Tile3D: React.FC<Tile3DProps> = ({
     tile.type === 'meta' ||
     tile.type === 'salida';
 
+  const baseSize = tile.type === 'meta' ? 3.1 : 2.3;
+  const baseHeight = tile.type === 'meta' ? 0.52 : isSpecial ? 0.36 : 0.26;
+  const pillarHeight = Math.max(0.08, tile.position[1] + 0.06 - baseHeight / 2);
+
   useFrame(({ clock }) => {
     const t = clock.getElapsedTime();
     if (iconGroupRef.current) {
       iconGroupRef.current.rotation.y = t * 0.9 + tile.index * 0.2;
       iconGroupRef.current.position.y =
-        0.36 + Math.sin(t * 2.2 + tile.index * 0.4) * (isActiveTile ? 0.08 : 0.03);
+        baseHeight / 2 + 0.42 + Math.sin(t * 2.2 + tile.index * 0.4) * (isActiveTile ? 0.06 : 0.025);
     }
     if (ringRef.current) {
       const scale = isActiveTile || hovered ? 1.06 + Math.sin(t * 5) * 0.04 : 1;
       ringRef.current.scale.set(scale, scale, 1);
     }
   });
-
-  const baseSize = tile.type === 'meta' ? 3.1 : 2.3;
-  const baseHeight = tile.type === 'meta' ? 0.52 : isSpecial ? 0.36 : 0.26;
 
   return (
     <group
@@ -300,6 +301,19 @@ export const Tile3D: React.FC<Tile3DProps> = ({
         onSelectTile?.(tile);
       }}
     >
+      {/* Pilar estructural que apoya cada casilla elevada sobre el suelo del complejo industrial */}
+      <mesh
+        position={[0, -baseHeight / 2 - pillarHeight / 2, 0]}
+        receiveShadow
+        castShadow
+      >
+        <cylinderGeometry args={[baseSize * 0.32, baseSize * 0.38, pillarHeight, 12]} />
+        <meshStandardMaterial color="#1E293B" metalness={0.5} roughness={0.5} />
+      </mesh>
+      <mesh position={[0, -tile.position[1] - 0.01, 0]} receiveShadow>
+        <cylinderGeometry args={[baseSize * 0.42, baseSize * 0.44, 0.08, 16]} />
+        <meshStandardMaterial color="#334155" metalness={0.45} roughness={0.5} />
+      </mesh>
       <RoundedBox
         args={[baseSize, baseHeight, baseSize]}
         radius={0.09}
@@ -347,7 +361,17 @@ export const Tile3D: React.FC<Tile3DProps> = ({
         </mesh>
       )}
 
-      <group ref={iconGroupRef} position={[0, baseHeight / 2 + 0.36, -0.05]}>
+      {/* Base emisora sobre la casilla para el icono 3D */}
+      <mesh position={[0, baseHeight / 2 + 0.03, -0.05]}>
+        <cylinderGeometry args={[0.3, 0.36, 0.04, 16]} />
+        <meshStandardMaterial
+          color="#1E293B"
+          emissive={tile.accentColor}
+          emissiveIntensity={0.45}
+        />
+      </mesh>
+
+      <group ref={iconGroupRef} position={[0, baseHeight / 2 + 0.42, -0.05]}>
         <TileIcon3D iconType={tile.icon3D} color={tile.color} accent={tile.accentColor} />
       </group>
 

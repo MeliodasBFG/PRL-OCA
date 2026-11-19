@@ -19,6 +19,34 @@ import {
 } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 
+function parseCsvRow(line: string): string[] {
+  const cols: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      cols.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  cols.push(cur);
+  return cols;
+}
+
 export const QuestionBankEditor: React.FC = () => {
   const {
     questionBank,
@@ -154,20 +182,20 @@ export const QuestionBankEditor: React.FC = () => {
         const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
         const imported: QuestionItem[] = [];
         for (let i = 1; i < lines.length; i++) {
-          const cols = lines[i].split(',');
+          const cols = parseCsvRow(lines[i]);
           if (cols.length >= 8) {
             imported.push({
-              id: cols[0].replace(/"/g, '') || `q_csv_${Date.now()}_${i}`,
-              title: cols[1].replace(/"/g, '') || 'Pregunta CSV',
-              prompt: cols[2].replace(/"/g, '') || 'Enunciado importado',
+              id: cols[0].trim() || `q_csv_${Date.now()}_${i}`,
+              title: cols[1].trim() || 'Pregunta CSV',
+              prompt: cols[2].trim() || 'Enunciado importado',
               category: (cols[3]?.trim() as PRLCategory) || 'conceptos_basicos',
               difficulty: (cols[4]?.trim() as Difficulty) || 'facil',
               type: (cols[5]?.trim() as QuestionType) || 'test',
               options: [
-                cols[6]?.replace(/"/g, '') || 'Opción A',
-                cols[7]?.replace(/"/g, '') || 'Opción B',
-                cols[8]?.replace(/"/g, '') || 'Opción C',
-                cols[9]?.replace(/"/g, '') || 'Opción D',
+                cols[6]?.trim() || 'Opción A',
+                cols[7]?.trim() || 'Opción B',
+                cols[8]?.trim() || '',
+                cols[9]?.trim() || '',
               ].filter(Boolean),
               correctIndices: [Number(cols[10]) || 0],
               points: Number(cols[11]) || 10,
@@ -177,7 +205,7 @@ export const QuestionBankEditor: React.FC = () => {
                 riskIdentified: 'Riesgo asociado a la categoría.',
                 consequences: 'Daño prevenible.',
                 preventiveMeasures: 'Aplicar medidas preventivas reglamentarias.',
-                legalReference: cols[13]?.replace(/"/g, '') || 'Ley 31/1995 LPRL',
+                legalReference: cols[13]?.trim() || 'Ley 31/1995 LPRL',
               },
               collection: 'Importada CSV',
               active: true,

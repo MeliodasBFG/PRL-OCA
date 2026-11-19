@@ -42,30 +42,44 @@ const IndustrialHeroStage: React.FC<{ reducedMotion?: boolean }> = ({ reducedMot
         <meshStandardMaterial color="#FFB800" emissive="#FFB800" emissiveIntensity={0.55} />
       </mesh>
 
-      {/* Mascota central "Prevenito" */}
-      <Mascot3D position={[0, 0.05, 1.4]} scale={1.2} mood="happy" />
+      {/* Mascota central "Prevenito" de pie sobre la plataforma */}
+      <Mascot3D position={[0, 0.0, 1.4]} scale={1.2} mood="happy" />
 
-      {/* Edificio industrial izquierdo + engranaje */}
+      {/* Edificio industrial izquierdo + eje de transmisión + engranaje */}
       <RoundedBox args={[2.8, 3.1, 2.0]} radius={0.12} position={[-3.4, 1.55, -2.0]} castShadow>
         <meshStandardMaterial color="#475569" metalness={0.4} roughness={0.4} />
       </RoundedBox>
-      <group ref={gear1Ref} position={[-3.4, 2.2, -0.85]}>
+      <mesh position={[-3.4, 2.2, -0.95]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+        <cylinderGeometry args={[0.18, 0.18, 0.3, 14]} />
+        <meshStandardMaterial color="#94A3B8" metalness={0.8} roughness={0.2} />
+      </mesh>
+      <group ref={gear1Ref} position={[-3.4, 2.2, -0.82]}>
         <Gear3D color="#FFB800" scale={2.1} />
       </group>
 
-      {/* Edificio corporativo derecho + engranaje verde */}
+      {/* Edificio corporativo derecho + eje de transmisión + engranaje verde */}
       <RoundedBox args={[2.8, 3.6, 2.0]} radius={0.12} position={[3.4, 1.8, -2.0]} castShadow>
         <meshStandardMaterial color="#0284C7" metalness={0.35} roughness={0.35} />
       </RoundedBox>
-      <group ref={gear2Ref} position={[3.4, 2.3, -0.85]}>
+      <mesh position={[3.4, 2.3, -0.95]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+        <cylinderGeometry args={[0.16, 0.16, 0.3, 14]} />
+        <meshStandardMaterial color="#94A3B8" metalness={0.8} roughness={0.2} />
+      </mesh>
+      <group ref={gear2Ref} position={[3.4, 2.3, -0.82]}>
         <Gear3D color="#10B981" scale={1.9} />
       </group>
 
-      {/* Señal de advertencia, Extintor, Casco y Carretilla claramente visibles */}
-      <SafetySign3D kind="warning" position={[-2.4, 0.72, 1.0]} scale={1.05} />
-      <FireExtinguisher3D variant="abc" position={[2.2, 0.05, 1.3]} scale={1.2} />
-      <SafetyHelmet3D position={[-1.9, 0.08, 2.2]} scale={1.05} />
-      <ForkliftDetailed3D position={[2.5, 0.02, -0.3]} rotation={[0, -0.65, 0]} scale={0.95} />
+      {/* Señal de advertencia CON POSTE Y PEANA, Extintor en suelo, Casco sobre peana y Carretilla */}
+      <SafetySign3D kind="warning" withPost={true} postHeight={0.95} position={[-2.4, 0.95, 1.0]} scale={1.0} />
+      <FireExtinguisher3D variant="abc" position={[2.2, 0.0, 1.3]} scale={1.2} />
+      <group position={[-1.9, 0, 2.2]}>
+        <mesh position={[0, 0.18, 0]} castShadow receiveShadow>
+          <cylinderGeometry args={[0.42, 0.48, 0.36, 20]} />
+          <meshStandardMaterial color="#1E293B" metalness={0.5} roughness={0.4} />
+        </mesh>
+        <SafetyHelmet3D position={[0, 0.36, 0]} scale={1.05} />
+      </group>
+      <ForkliftDetailed3D position={[2.5, 0.0, -0.3]} rotation={[0, -0.65, 0]} scale={0.95} />
     </group>
   );
 };
