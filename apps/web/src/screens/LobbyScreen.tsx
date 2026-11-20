@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   Edit2,
@@ -13,7 +13,7 @@ import {
 import { TEAM_ROLE_INFO } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 import { LobbyScene3D } from '../scenes/LobbyScene3D';
-import { enterGameLandscapeMode } from '../utils/mobileOrientation';
+import { mpClient } from '../multiplayer/wsClient';
 
 export const LobbyScreen: React.FC = () => {
   const {
@@ -21,21 +21,66 @@ export const LobbyScreen: React.FC = () => {
     playerId,
     isTeacher,
     connectionStatus,
+    isRemoteSession,
+    errorMessage,
+    clearError,
     setShowQRModal,
     selectTeamInLobby,
     toggleReadyInLobby,
     populate15DemoPlayers,
     runTeacherCommand,
+    syncRoomFromServer,
     leaveRoom,
   } = useGameStore();
 
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState<string>('');
+  const [startingGame, setStartingGame] = useState<boolean>(false);
+
+  // Automatic WebSocket reconnect + HTTP state resync safety while waiting in Lobby
+  useEffect(() => {
+    if (!isRemoteSession || !roomState) return;
+
+    const resyncNow = () => {
+      mpClient.forceReconnectIfNeeded();
+      void syncRoomFromServer();
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        resyncNow();
+      }
+    };
+
+    window.addEventListener('focus', resyncNow);
+    window.addEventListener('online', resyncNow);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const intervalMs = connectionStatus === 'connected' ? 12000 : 2500;
+    const pollTimer = setInterval(() => {
+      void syncRoomFromServer();
+    }, intervalMs);
+
+    return () => {
+      window.removeEventListener('focus', resyncNow);
+      window.removeEventListener('online', resyncNow);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(pollTimer);
+    };
+  }, [isRemoteSession, roomState?.roomCode, connectionStatus, syncRoomFromServer]);
 
   if (!roomState) return null;
 
   const activeParticipants = roomState.players.filter((p) => !p.isTeacher && !p.isSpectator);
   const myPlayer = roomState.players.find((p) => p.id === playerId);
+  const connectionLabel =
+    connectionStatus === 'connected'
+      ? 'Servidor Cloudflare Sincronizado'
+      : connectionStatus === 'connecting'
+      ? 'Conectando con Cloudflare Workers...'
+      : isRemoteSession
+      ? 'Reconectando con la sala en Cloudflare...'
+      : 'Sincronización Multi-Pestaña Activa';
 
   return (
     <main className="screen-page lobby-page">
@@ -51,10 +96,7 @@ export const LobbyScreen: React.FC = () => {
                 Participantes
               </span>
               <span className="meta-pill">
-                <Wifi size={15} />{' '}
-                {connectionStatus === 'connected'
-                  ? 'Servidor Cloudflare Sincronizado'
-                  : 'Sincronización Multi-Pestaña Activa'}
+                <Wifi size={15} /> {connectionLabel}
               </span>
               <span className="meta-pill">
                 Dados: <strong>{roomState.config.diceMode.toUpperCase()}</strong>
@@ -85,6 +127,20 @@ export const LobbyScreen: React.FC = () => {
 
         {/* Escaparate 3D de las Fichas de Equipos */}
         <LobbyScene3D teams={roomState.teams} />
+
+        {errorMessage && (
+          <div className="error-banner" role="alert">
+            <span>{errorMessage}</span>
+            <button
+              type="button"
+              className="btn-ghost-sm"
+              onClick={clearError}
+              style={{ marginLeft: '0.75rem' }}
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
 
         {/* Acciones Rápidas de Docente y Jugador */}
         <div className="lobby-toolbar">
@@ -133,12 +189,16 @@ export const LobbyScreen: React.FC = () => {
                 <button
                   type="button"
                   className="btn-primary btn-lg"
+                  disabled={startingGame}
                   onClick={() => {
-                    void enterGameLandscapeMode();
-                    runTeacherCommand({ kind: 'START_GAME' });
+                    setStartingGame(true);
+                    void Promise.resolve(runTeacherCommand({ kind: 'START_GAME' })).finally(() => {
+                      setStartingGame(false);
+                    });
                   }}
                 >
-                  <Play size={20} /> INICIAR PARTIDA EN TABLERO 3D
+                  <Play size={20} />{' '}
+                  {startingGame ? 'INICIANDO PARTIDA...' : 'INICIAR PARTIDA EN TABLERO 3D'}
                 </button>
               </>
             ) : (

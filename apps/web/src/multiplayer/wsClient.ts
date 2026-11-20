@@ -2,14 +2,19 @@ import {
   ClientToServerMessage,
   GameRoomState,
   ServerToClientMessage,
+  normalizeRoomCode,
 } from '@prl-oca/shared';
 import { resolveWebSocketUrl } from '../utils/networkConfig';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'local_sync';
 
+const WS_CONNECT_TIMEOUT_MS = 8000;
+const WS_RECONNECT_DELAY_MS = 2500;
+
 export class MultiplayerClient {
   private ws: WebSocket | null = null;
   private channel: BroadcastChannel | null = null;
+  private connectTimeout: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private roomCode = '';
@@ -17,22 +22,25 @@ export class MultiplayerClient {
   private onStatusCallback: ((status: ConnectionState) => void) | null = null;
   private joinPayload: Extract<ClientToServerMessage, { type: 'JOIN_ROOM' }> | null = null;
   private intentionalClose = false;
+  private useLocalBroadcast = true;
 
   public connect(
     roomCode: string,
     joinMsg: Extract<ClientToServerMessage, { type: 'JOIN_ROOM' }>,
     onMessage: (msg: ServerToClientMessage) => void,
-    onStatus: (status: ConnectionState) => void
+    onStatus: (status: ConnectionState) => void,
+    options?: { useLocalBroadcast?: boolean }
   ): void {
     this.disconnect();
     this.intentionalClose = false;
-    this.roomCode = roomCode.toUpperCase();
+    this.roomCode = normalizeRoomCode(roomCode);
     this.joinPayload = joinMsg;
     this.onMessageCallback = onMessage;
     this.onStatusCallback = onStatus;
+    this.useLocalBroadcast = options?.useLocalBroadcast ?? true;
 
-    // Set up cross-tab BroadcastChannel synchronization as immediate backup
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+    // Cross-tab BroadcastChannel is only enabled for pure offline multi-tab demo mode
+    if (this.useLocalBroadcast && typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       this.channel = new BroadcastChannel(`prl_oca_room_${this.roomCode}`);
       this.channel.onmessage = (ev) => {
         if (ev.data && this.onMessageCallback) {
@@ -44,6 +52,31 @@ export class MultiplayerClient {
     this.openWebSocket();
   }
 
+  private clearConnectTimeout(): void {
+    if (this.connectTimeout) {
+      clearTimeout(this.connectTimeout);
+      this.connectTimeout = null;
+    }
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private scheduleReconnect(delayMs = WS_RECONNECT_DELAY_MS): void {
+    this.clearReconnectTimer();
+    if (this.intentionalClose || !this.roomCode) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.intentionalClose) {
+        this.openWebSocket();
+      }
+    }, delayMs);
+  }
+
   private openWebSocket(): void {
     const wsUrl = resolveWebSocketUrl(this.roomCode);
     if (!wsUrl) {
@@ -51,25 +84,32 @@ export class MultiplayerClient {
       return;
     }
 
+    this.clearConnectTimeout();
+    this.clearReconnectTimer();
     this.onStatusCallback?.('connecting');
 
     try {
       const sock = new WebSocket(wsUrl);
       this.ws = sock;
 
-      const fallbackTimeout = setTimeout(() => {
+      this.connectTimeout = setTimeout(() => {
+        if (this.ws !== sock) return;
         if (sock.readyState !== WebSocket.OPEN) {
+          console.warn(`[PRL-OCA][WS] Handshake timeout after ${WS_CONNECT_TIMEOUT_MS}ms (${wsUrl})`);
           try {
             sock.close();
           } catch {
             // Ignore
           }
-          this.onStatusCallback?.('local_sync');
+          this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
         }
-      }, 2200);
+      }, WS_CONNECT_TIMEOUT_MS);
 
       sock.onopen = () => {
-        clearTimeout(fallbackTimeout);
+        if (this.ws !== sock) return;
+        this.clearConnectTimeout();
+        this.clearReconnectTimer();
+        console.info(`[PRL-OCA][WS] Connected to room ${this.roomCode} (${wsUrl})`);
         this.onStatusCallback?.('connected');
         if (this.joinPayload) {
           // Always generate a fresh actionId so server deduplication never drops a reconnect JOIN_ROOM
@@ -82,6 +122,7 @@ export class MultiplayerClient {
       };
 
       sock.onmessage = (event) => {
+        if (this.ws !== sock) return;
         try {
           const parsed = JSON.parse(String(event.data)) as ServerToClientMessage;
           this.onMessageCallback?.(parsed);
@@ -91,25 +132,41 @@ export class MultiplayerClient {
       };
 
       sock.onerror = () => {
-        clearTimeout(fallbackTimeout);
-        this.onStatusCallback?.('local_sync');
+        if (this.ws !== sock) return;
+        this.clearConnectTimeout();
+        console.warn(`[PRL-OCA][WS] Socket error on room ${this.roomCode}`);
+        this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
       };
 
-      sock.onclose = () => {
-        clearTimeout(fallbackTimeout);
+      sock.onclose = (ev) => {
+        if (this.ws !== sock) return;
+        this.clearConnectTimeout();
         this.stopPing();
+        this.ws = null;
         if (!this.intentionalClose) {
-          this.onStatusCallback?.('local_sync');
-          this.reconnectTimer = setTimeout(() => {
-            if (!this.intentionalClose) {
-              this.openWebSocket();
-            }
-          }, 5000);
+          console.warn(
+            `[PRL-OCA][WS] Closed on room ${this.roomCode} (code=${ev.code}); scheduling reconnect`
+          );
+          this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
+          this.scheduleReconnect();
         }
       };
     } catch {
-      this.onStatusCallback?.('local_sync');
+      this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
+      this.scheduleReconnect();
     }
+  }
+
+  public isConnected(): boolean {
+    return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+  }
+
+  public forceReconnectIfNeeded(): void {
+    if (this.intentionalClose || !this.roomCode || !this.joinPayload) return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    this.openWebSocket();
   }
 
   public send(msg: ClientToServerMessage): boolean {
@@ -181,22 +238,22 @@ export class MultiplayerClient {
   public disconnect(): void {
     this.intentionalClose = true;
     this.stopPing();
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.ws) {
+    this.clearConnectTimeout();
+    this.clearReconnectTimer();
+    const currentWs = this.ws;
+    this.ws = null;
+    if (currentWs) {
       try {
-        this.ws.close();
+        currentWs.close();
       } catch {
         // Ignore
       }
-      this.ws = null;
     }
     if (this.channel) {
       this.channel.close();
       this.channel = null;
     }
+    this.roomCode = '';
     this.onStatusCallback?.('disconnected');
   }
 }

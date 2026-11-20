@@ -304,6 +304,7 @@ export interface GameRoomState {
   logs: GameLogEvent[];
   usedQuestionIds: string[];
   createdAt: number;
+  startedAt?: number;
   updatedAt: number;
 }
 
@@ -413,6 +414,12 @@ export type ServerToClientMessage =
       state: GameRoomState;
       yourPlayerId?: string;
       teacherToken?: string;
+    }
+  | {
+      type: 'GAME_STARTED';
+      roomCode: string;
+      startedAt: number;
+      state: GameRoomState;
     }
   | {
       type: 'DICE_ROLLED';

@@ -15,6 +15,7 @@ import {
   disconnectPlayerFromState,
   executeTeacherCommandServerSide,
   joinPlayerToState,
+  normalizeRoomCode,
   refreshAllTeamRoles,
   rollDiceServerSide,
   submitAnswerServerSide,
@@ -119,6 +120,7 @@ export interface GameStore {
   screen: AppScreen;
   createJoinTab: 'create' | 'join';
   connectionStatus: ConnectionState;
+  isRemoteSession: boolean;
   roomState: GameRoomState | null;
   playerId: string;
   playerName: string;
@@ -189,6 +191,8 @@ export interface GameStore {
   populate15DemoPlayers: () => void;
   markLocalDisconnect: () => void;
   leaveRoom: () => void;
+  applyServerMessage: (msg: ServerToClientMessage) => void;
+  syncRoomFromServer: () => Promise<void>;
 
   // Gameplay Actions
   selectTeamInLobby: (teamId: string) => void;
@@ -207,7 +211,7 @@ export interface GameStore {
     questionId?: string;
     challengeId?: string;
     partialConfig?: Partial<GameConfig>;
-  }) => void;
+  }) => Promise<void> | void;
 
   // Question Bank CRUD
   saveQuestion: (item: QuestionItem) => void;
@@ -343,21 +347,67 @@ export const useGameStore = create<GameStore>((set, get) => {
     set({ matchHistory: updatedHistory });
   };
 
+  const deriveScreenFromRoomState = (room: GameRoomState): AppScreen => {
+    if (room.status === 'finished') return 'victory';
+    if (room.status === 'playing' || room.status === 'paused') return 'game';
+    return 'lobby';
+  };
+
   const handleServerMessage = (msg: ServerToClientMessage) => {
+    if (msg.type === 'GAME_STARTED') {
+      const currentCode = normalizeRoomCode(get().roomState?.roomCode ?? '');
+      const incomingCode = normalizeRoomCode(msg.roomCode || msg.state.roomCode);
+      if (currentCode && incomingCode && currentCode !== incomingCode) {
+        console.warn(
+          `[PRL-OCA][Sync] Ignoring GAME_STARTED for another room (${incomingCode} != ${currentCode})`
+        );
+        return;
+      }
+
+      const prevStatus = get().roomState?.status;
+      clearMovementTimers();
+      console.info(
+        `[PRL-OCA][Sync] GAME_STARTED handled for room=${incomingCode} startedAt=${msg.startedAt} turn=${msg.state.turnNumber}`
+      );
+
+      if (prevStatus !== 'playing') {
+        soundEngine.playSfx('challenge_start');
+        soundEngine.playMusic('board');
+      }
+
+      set({
+        roomState: { ...msg.state },
+        screen: deriveScreenFromRoomState(msg.state),
+        errorMessage: null,
+        isRollingAnimation: false,
+        isTokenMoving: false,
+        challengeModalReady: true,
+      });
+      void enterGameLandscapeMode();
+      return;
+    }
+
     if (msg.type === 'STATE_SYNC') {
+      const currentCode = normalizeRoomCode(get().roomState?.roomCode ?? '');
+      const incomingCode = normalizeRoomCode(msg.state.roomCode);
+      if (currentCode && incomingCode && currentCode !== incomingCode) {
+        return;
+      }
+
+      const prevStatus = get().roomState?.status;
       const prevRollTs = get().roomState?.lastDiceRoll?.timestamp ?? 0;
       const incomingRollTs = msg.state.lastDiceRoll?.timestamp ?? 0;
       const hasNewRollFromSync =
         incomingRollTs > prevRollTs && msg.state.phase === 'answering';
 
-      const nextScreen =
-        msg.state.status === 'finished'
-          ? 'victory'
-          : msg.state.status === 'playing' || msg.state.status === 'paused'
-          ? 'game'
-          : 'lobby';
+      const nextScreen = deriveScreenFromRoomState(msg.state);
+      const startedFromLobby = prevStatus === 'lobby' && msg.state.status === 'playing';
 
-      if (msg.state.status === 'finished') {
+      if (startedFromLobby) {
+        clearMovementTimers();
+        soundEngine.playSfx('challenge_start');
+        soundEngine.playMusic('board');
+      } else if (msg.state.status === 'finished') {
         soundEngine.playSfx('victory_fanfare');
         soundEngine.playMusic('victory');
         persistFinishedMatchHistory(msg.state);
@@ -371,10 +421,11 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       set({
-        roomState: msg.state,
+        roomState: { ...msg.state },
         playerId: msg.yourPlayerId ?? get().playerId,
         teacherToken: msg.teacherToken ?? get().teacherToken,
         screen: nextScreen,
+        errorMessage: null,
       });
       if (nextScreen === 'game') {
         void enterGameLandscapeMode();
@@ -413,6 +464,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     screen: 'home',
     createJoinTab: 'create',
     connectionStatus: 'disconnected',
+    isRemoteSession: false,
     roomState: null,
     playerId: getOrCreatePlayerId(),
     playerName: 'Participante PRL',
@@ -527,6 +579,52 @@ export const useGameStore = create<GameStore>((set, get) => {
       }, 850);
     },
 
+    applyServerMessage: (msg) => {
+      handleServerMessage(msg);
+    },
+
+    syncRoomFromServer: async () => {
+      const currentRoom = get().roomState;
+      if (!currentRoom || !get().isRemoteSession) return;
+      const apiBase = resolveApiBaseUrl();
+      if (!apiBase) return;
+      const code = normalizeRoomCode(currentRoom.roomCode);
+      if (!code) return;
+
+      try {
+        const res = await fetch(`${apiBase}/api/rooms/${code}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = (await res.json()) as { ok: boolean; state?: GameRoomState };
+        if (!data.ok || !data.state) return;
+
+        const latest = get().roomState;
+        if (!latest || normalizeRoomCode(latest.roomCode) !== code) return;
+
+        const hasNewerUpdate =
+          data.state.status !== latest.status ||
+          data.state.updatedAt > latest.updatedAt ||
+          data.state.players.length !== latest.players.length;
+
+        if (!hasNewerUpdate) return;
+
+        if (latest.status === 'lobby' && data.state.status === 'playing') {
+          handleServerMessage({
+            type: 'GAME_STARTED',
+            roomCode: data.state.roomCode,
+            startedAt: data.state.startedAt ?? data.state.updatedAt,
+            state: data.state,
+          });
+        } else {
+          handleServerMessage({
+            type: 'STATE_SYNC',
+            state: data.state,
+          });
+        }
+      } catch {
+        // Ignore transient polling failures
+      }
+    },
+
     createRoom: async ({ teacherName, teacherPin, config }) => {
       soundEngine.unlockAudio();
       soundEngine.playSfx('menu_open');
@@ -539,11 +637,12 @@ export const useGameStore = create<GameStore>((set, get) => {
       let initialState = createInitialRoomState(roomCode, config);
       let token = cleanTeacherPin;
       let createdOnServer = false;
+      let serverError: string | null = null;
 
       if (apiBase) {
         try {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 5500);
+          const timeout = setTimeout(() => controller.abort(), 10000);
           const res = await fetch(`${apiBase}/api/rooms`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -559,20 +658,24 @@ export const useGameStore = create<GameStore>((set, get) => {
               state: GameRoomState;
             };
             if (data.ok && data.roomCode) {
-              roomCode = data.roomCode;
+              roomCode = normalizeRoomCode(data.roomCode);
               initialState = data.state;
               token = data.teacherToken;
               createdOnServer = true;
             }
+          } else {
+            const errJson = (await res.json().catch(() => null)) as { error?: string } | null;
+            serverError = errJson?.error ?? `Error del servidor (${res.status}).`;
           }
         } catch {
-          // Handled below according to VITE_ENABLE_LOCAL_FALLBACK
+          serverError = 'No se pudo conectar con el servidor Cloudflare Workers.';
         }
       }
 
       if (!createdOnServer && !allowLocalFallback) {
         set({
           errorMessage:
+            serverError ??
             'No se pudo conectar con el servidor Cloudflare Workers para crear la sala multijugador.',
         });
         return;
@@ -590,6 +693,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       set({
         roomState: { ...initialState },
+        isRemoteSession: createdOnServer,
         playerId: resolvedPlayerId,
         playerName: teacherDisplayName,
         isTeacher: true,
@@ -613,9 +717,12 @@ export const useGameStore = create<GameStore>((set, get) => {
           teacherPin: cleanTeacherPin,
         },
         (msg: ServerToClientMessage) => handleServerMessage(msg),
-        (status) => set({ connectionStatus: status })
+        (status) => set({ connectionStatus: status }),
+        { useLocalBroadcast: !createdOnServer }
       );
-      mpClient.broadcastLocalState(initialState);
+      if (!createdOnServer) {
+        mpClient.broadcastLocalState(initialState);
+      }
     },
 
     joinRoom: async ({
@@ -629,8 +736,8 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.unlockAudio();
       soundEngine.playSfx('button_click');
 
-      const cleanCode = roomCode.trim().toUpperCase();
-      if (!cleanCode) {
+      const cleanCode = normalizeRoomCode(roomCode);
+      if (!cleanCode || cleanCode.length < 3) {
         set({ errorMessage: 'Introduce un código de sala válido.' });
         return;
       }
@@ -639,30 +746,51 @@ export const useGameStore = create<GameStore>((set, get) => {
       const allowLocalFallback = isLocalFallbackEnabled();
       let state = allowLocalFallback ? mpClient.loadCachedRoomState(cleanCode) : null;
       let loadedFromServer = false;
+      let serverStatus = 0;
+      let serverError: string | null = null;
 
       if (apiBase) {
         try {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 5500);
+          const timeout = setTimeout(() => controller.abort(), 10000);
           const res = await fetch(`${apiBase}/api/rooms/${cleanCode}`, {
             signal: controller.signal,
+            cache: 'no-store',
           });
           clearTimeout(timeout);
+          serverStatus = res.status;
           if (res.ok) {
             const data = (await res.json()) as { ok: boolean; state: GameRoomState };
             if (data.ok && data.state) {
               state = data.state;
               loadedFromServer = true;
             }
+          } else {
+            const errJson = (await res.json().catch(() => null)) as { error?: string } | null;
+            serverError =
+              errJson?.error ??
+              (res.status === 404
+                ? `No existe la sala "${cleanCode}" en el servidor. Comprueba el código.`
+                : `Error del servidor (${res.status}).`);
           }
         } catch {
           // Handled below according to VITE_ENABLE_LOCAL_FALLBACK
         }
       }
 
+      if (serverStatus === 404 || serverStatus === 400) {
+        set({
+          errorMessage:
+            serverError ??
+            `La sala "${cleanCode}" no existe en el servidor. Verifica el código introducido.`,
+        });
+        return;
+      }
+
       if (!loadedFromServer && !allowLocalFallback) {
         set({
           errorMessage:
+            serverError ??
             'No se pudo conectar con la sala en el servidor Cloudflare Workers. Verifica la URL del backend o el código de sala.',
         });
         return;
@@ -690,15 +818,11 @@ export const useGameStore = create<GameStore>((set, get) => {
       const resolvedPlayerId = joinRes.player?.id ?? playerId;
       persistSessionPlayerIdentity(resolvedPlayerId, cleanAlias);
 
-      const targetScreen: AppScreen =
-        state.status === 'finished'
-          ? 'victory'
-          : state.status === 'playing' || state.status === 'paused'
-          ? 'game'
-          : 'lobby';
+      const targetScreen = deriveScreenFromRoomState(state);
 
       set({
         roomState: { ...state },
+        isRemoteSession: loadedFromServer,
         playerId: resolvedPlayerId,
         playerName: cleanAlias,
         isTeacher: Boolean(isTeacher),
@@ -724,9 +848,12 @@ export const useGameStore = create<GameStore>((set, get) => {
           teacherPin,
         },
         (msg) => handleServerMessage(msg),
-        (status) => set({ connectionStatus: status })
+        (status) => set({ connectionStatus: status }),
+        { useLocalBroadcast: !loadedFromServer }
       );
-      mpClient.broadcastLocalState(state);
+      if (!loadedFromServer) {
+        mpClient.broadcastLocalState(state);
+      }
       if (targetScreen === 'game') {
         void enterGameLandscapeMode();
       }
@@ -765,6 +892,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       set({
         roomState: { ...state },
+        isRemoteSession: false,
         playerName: playerName || 'Especialista PRL',
         isTeacher: true,
         isSpectator: false,
@@ -845,6 +973,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       void exitGameLandscapeMode();
       set({
         roomState: null,
+        isRemoteSession: false,
         screen: 'home',
         projectorMode: false,
         showTeacherPanel: false,
@@ -860,12 +989,20 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.playSfx('button_click');
 
       const playerId = get().playerId;
-      if (get().connectionStatus === 'connected') {
+      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
         mpClient.send({
           type: 'SELECT_TEAM',
           actionId: `sel_${Date.now()}`,
           playerId,
           teamId,
+        });
+        return;
+      }
+
+      if (get().isRemoteSession || !isLocalFallbackEnabled()) {
+        mpClient.forceReconnectIfNeeded();
+        set({
+          errorMessage: 'Reconectando con la sala en Cloudflare para cambiar de equipo...',
         });
         return;
       }
@@ -885,11 +1022,19 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.playSfx('button_click');
 
       const playerId = get().playerId;
-      if (get().connectionStatus === 'connected') {
+      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
         mpClient.send({
           type: 'TOGGLE_READY',
           actionId: `rdy_${Date.now()}`,
           playerId,
+        });
+        return;
+      }
+
+      if (get().isRemoteSession || !isLocalFallbackEnabled()) {
+        mpClient.forceReconnectIfNeeded();
+        set({
+          errorMessage: 'Reconectando con la sala en Cloudflare para actualizar tu estado...',
         });
         return;
       }
@@ -1091,37 +1236,132 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
     },
 
-    runTeacherCommand: (command) => {
+    runTeacherCommand: async (command) => {
       const state = get().roomState;
       if (!state) return;
       clearMovementTimers();
       soundEngine.playSfx('button_click');
+      set({ errorMessage: null });
 
-      if (get().connectionStatus === 'connected') {
-        mpClient.send({
+      const normalizedCode = normalizeRoomCode(state.roomCode);
+      const mustUseRemote = get().isRemoteSession || !isLocalFallbackEnabled();
+      const teacherCmd = command as Extract<
+        Parameters<typeof mpClient.send>[0],
+        { type: 'TEACHER_ACTION' }
+      >['command'];
+
+      const sendHttpTeacherAction = async () => {
+        const apiBase = resolveApiBaseUrl();
+        if (!apiBase) {
+          set({
+            errorMessage:
+              'Sin conexión con el servidor Cloudflare Workers. Revisa tu conexión antes de iniciar.',
+          });
+          return;
+        }
+        try {
+          console.info(
+            `[PRL-OCA][Teacher] Executing ${teacherCmd.kind} via HTTP authoritative endpoint (room=${normalizedCode})`
+          );
+          const res = await fetch(`${apiBase}/api/rooms/${normalizedCode}/teacher-action`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Teacher-Token': get().teacherToken,
+            },
+            body: JSON.stringify({
+              teacherToken: get().teacherToken,
+              command: teacherCmd,
+            }),
+          });
+          const data = (await res.json().catch(() => null)) as {
+            ok?: boolean;
+            error?: string;
+            startedAt?: number;
+            state?: GameRoomState;
+          } | null;
+
+          if (!res.ok || !data?.ok || !data.state) {
+            set({
+              errorMessage:
+                data?.error ??
+                `No se pudo sincronizar la acción docente (${teacherCmd.kind}) con el servidor.`,
+            });
+            return;
+          }
+
+          if (teacherCmd.kind === 'START_GAME') {
+            handleServerMessage({
+              type: 'GAME_STARTED',
+              roomCode: data.state.roomCode,
+              startedAt: data.startedAt ?? data.state.startedAt ?? Date.now(),
+              state: data.state,
+            });
+          } else {
+            handleServerMessage({
+              type: 'STATE_SYNC',
+              state: data.state,
+            });
+          }
+        } catch {
+          set({
+            errorMessage:
+              'Error de red al enviar la orden del docente al servidor Cloudflare Workers.',
+          });
+        }
+      };
+
+      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
+        console.info(
+          `[PRL-OCA][Teacher] Sending TEACHER_ACTION via WebSocket: ${teacherCmd.kind} (room=${normalizedCode})`
+        );
+        const sent = mpClient.send({
           type: 'TEACHER_ACTION',
-          actionId: `tcmd_${Date.now()}`,
+          actionId: `tcmd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           teacherToken: get().teacherToken,
-          command: command as Extract<
-            Parameters<typeof mpClient.send>[0],
-            { type: 'TEACHER_ACTION' }
-          >['command'],
+          command: teacherCmd,
         });
+
+        if (sent) {
+          if (teacherCmd.kind === 'START_GAME') {
+            // If WS confirmation hasn't transitioned out of lobby within 1.5s, fall back to authoritative HTTP endpoint
+            setTimeout(() => {
+              const cur = get().roomState;
+              if (cur && normalizeRoomCode(cur.roomCode) === normalizedCode && cur.status === 'lobby') {
+                console.warn(
+                  `[PRL-OCA][Teacher] START_GAME WS confirmation pending after 1500ms; confirming via HTTP`
+                );
+                void sendHttpTeacherAction();
+              }
+            }, 1500);
+          }
+          return;
+        }
+      }
+
+      if (mustUseRemote) {
+        mpClient.forceReconnectIfNeeded();
+        await sendHttpTeacherAction();
         return;
       }
 
+      // Pure offline / demo fallback (only when no backend room was created)
       const res = executeTeacherCommandServerSide(state, command, get().questionBank);
       if (!res.ok) {
         set({ errorMessage: res.error ?? null });
         return;
       }
 
-      let nextScreen: AppScreen = get().screen;
+      const nextScreen =
+        state.status === 'playing' || state.status === 'paused'
+          ? 'game'
+          : state.status === 'finished'
+          ? 'victory'
+          : get().screen;
+
       if (state.status === 'playing' || state.status === 'paused') {
-        nextScreen = 'game';
         soundEngine.playMusic('board');
       } else if (state.status === 'finished') {
-        nextScreen = 'victory';
         soundEngine.playSfx('victory_fanfare');
         soundEngine.playMusic('victory');
         const record = buildMatchHistoryFromState(state);
@@ -1138,6 +1378,9 @@ export const useGameStore = create<GameStore>((set, get) => {
         isTokenMoving: false,
         challengeModalReady: true,
       });
+      if (nextScreen === 'game') {
+        void enterGameLandscapeMode();
+      }
       mpClient.broadcastLocalState(state);
     },
 

@@ -41,7 +41,7 @@ export const CreateJoinScreen: React.FC = () => {
       const params = new URLSearchParams(window.location.search);
       const urlRoom = params.get('room');
       if (urlRoom) {
-        setJoinCode(urlRoom.toUpperCase());
+        setJoinCode(urlRoom.trim().toUpperCase());
         setCreateJoinTab('join');
       }
     }

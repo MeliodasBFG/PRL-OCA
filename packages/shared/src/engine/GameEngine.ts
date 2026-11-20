@@ -24,6 +24,10 @@ import {
   TeamRole,
 } from '../types/game';
 
+export function normalizeRoomCode(code: string): string {
+  return code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+}
+
 function createLog(
   type: GameLogEvent['type'],
   message: string,
@@ -152,9 +156,10 @@ export function createInitialRoomState(
         : [...ALL_PRL_CATEGORIES],
   };
 
+  const normalizedCode = normalizeRoomCode(roomCode) || 'PRL001';
   const now = Date.now();
   return {
-    roomCode: roomCode.toUpperCase(),
+    roomCode: normalizedCode,
     status: 'lobby',
     config,
     players: [],
@@ -169,7 +174,7 @@ export function createInitialRoomState(
     logs: [
       createLog(
         'system',
-        `Sala ${roomCode.toUpperCase()} creada. Configuración: ${
+        `Sala ${normalizedCode} creada. Configuración: ${
           config.mode === 'teams' ? `${config.teamCount} equipos` : 'Modo individual'
         } (máx. ${config.maxPlayers} participantes).`
       ),
@@ -958,8 +963,27 @@ export function executeTeacherCommandServerSide(
 
   switch (command.kind) {
     case 'START_GAME': {
+      if (state.status === 'finished') {
+        return { ok: false, error: 'La partida ya ha finalizado.' };
+      }
+      if (state.status === 'playing') {
+        if (!state.startedAt) {
+          state.startedAt = now;
+        }
+        return { ok: true };
+      }
+      if (state.status !== 'lobby') {
+        return {
+          ok: false,
+          error: `La partida solo puede iniciarse desde la sala de espera (estado actual: ${state.status}).`,
+        };
+      }
       state.status = 'playing';
       state.phase = 'waiting_roll';
+      state.startedAt = now;
+      state.turnNumber = 1;
+      state.activeTeamIndex = 0;
+      state.winnerTeamId = null;
       refreshAllTeamRoles(state);
       state.logs.unshift(
         createLog('teacher', '¡El docente ha iniciado la partida en el tablero 3D!')

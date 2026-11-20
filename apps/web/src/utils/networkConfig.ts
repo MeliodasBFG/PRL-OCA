@@ -107,14 +107,15 @@ export function resolveWebSocketUrl(
     normalized = `${isHttps ? 'wss' : 'ws'}://${normalized}`;
   }
 
+  const cleanCode = roomCode.trim().toUpperCase();
   try {
     const parsed = new URL(normalized);
     // Enforce secure WSS whenever the frontend is loaded over HTTPS (e.g. Cloudflare Pages *.pages.dev)
     if (isHttps && parsed.protocol === 'ws:' && !isLocalHostname(parsed.hostname)) {
       parsed.protocol = 'wss:';
     }
-    return `${parsed.toString().replace(/\/$/, '')}/ws/${roomCode.toUpperCase()}`;
+    return `${parsed.toString().replace(/\/$/, '')}/ws/${cleanCode}`;
   } catch {
-    return `${normalized}/ws/${roomCode.toUpperCase()}`;
+    return `${normalized}/ws/${cleanCode}`;
   }
 }
