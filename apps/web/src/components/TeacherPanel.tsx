@@ -12,7 +12,14 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import { BOARD_TILES, CHALLENGES_3D, Difficulty, WrongAnswerPenalty } from '@prl-oca/shared';
+import {
+  BOARD_TILES,
+  CHALLENGES_3D,
+  Difficulty,
+  WrongAnswerPenalty,
+  getRoomParticipantStats,
+  isPlayerCountedAsParticipant,
+} from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 
 export const TeacherPanel: React.FC = () => {
@@ -477,54 +484,67 @@ export const TeacherPanel: React.FC = () => {
 
           {/* 5. Gestión de Participantes Conectados */}
           <section className="tp-section">
-            <h3>
-              5. Participantes Conectados (
-              {roomState.players.filter((p) => !p.isTeacher && !p.isSpectator).length} /{' '}
-              {roomState.config.maxPlayers})
-            </h3>
-            <div className="tp-players-list">
-              {roomState.players
-                .filter((p) => !p.isTeacher && !p.isSpectator)
-                .map((player) => (
-                  <div key={player.id} className="tp-player-row">
-                    <span className="tp-player-name">
-                      <UserCheck size={15} /> {player.name}
-                    </span>
-                    <div className="tp-player-actions">
-                      <select
-                        value={player.teamId}
-                        onChange={(e) =>
-                          runTeacherCommand({
-                            kind: 'ASSIGN_TEAM',
-                            playerId: player.id,
-                            teamId: e.target.value,
-                          })
-                        }
-                        aria-label={`Cambiar equipo de ${player.name}`}
-                      >
-                        {roomState.teams.map((t) => (
-                          <option key={t.id} value={t.id}>
-                            {t.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        className="btn-icon-only danger"
-                        title="Expulsar participante"
-                        onClick={() =>
-                          runTeacherCommand({
-                            kind: 'KICK_PLAYER',
-                            playerId: player.id,
-                          })
-                        }
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
+            {(() => {
+              const stats = getRoomParticipantStats(roomState);
+              const listedParticipants = roomState.players.filter(isPlayerCountedAsParticipant);
+              return (
+                <>
+                  <h3>
+                    5. Participantes Conectados ({stats.connectedCount} / {stats.maxPlayers})
+                  </h3>
+                  <p className="card-desc" style={{ marginBottom: '0.75rem' }}>
+                    Registrados: <strong>{stats.registeredCount}</strong> · Conectados:{' '}
+                    <strong>{stats.connectedCount}</strong> · Desconectados:{' '}
+                    <strong>{stats.disconnectedCount}</strong> · Docente:{' '}
+                    <strong>{stats.teacherConnected ? 'Conectado' : 'Desconectado'}</strong>
+                  </p>
+                  <div className="tp-players-list">
+                    {listedParticipants.map((player) => (
+                      <div key={player.id} className="tp-player-row">
+                        <span className="tp-player-name">
+                          <UserCheck size={15} /> {player.name}{' '}
+                          <small style={{ opacity: 0.75 }}>
+                            ({player.connected ? 'Conectado' : 'Desconectado'})
+                          </small>
+                        </span>
+                        <div className="tp-player-actions">
+                          <select
+                            value={player.teamId}
+                            onChange={(e) =>
+                              runTeacherCommand({
+                                kind: 'ASSIGN_TEAM',
+                                playerId: player.id,
+                                teamId: e.target.value,
+                              })
+                            }
+                            aria-label={`Cambiar equipo de ${player.name}`}
+                          >
+                            {roomState.teams.map((t) => (
+                              <option key={t.id} value={t.id}>
+                                {t.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className="btn-icon-only danger"
+                            title="Expulsar participante"
+                            onClick={() =>
+                              runTeacherCommand({
+                                kind: 'KICK_PLAYER',
+                                playerId: player.id,
+                              })
+                            }
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-            </div>
+                </>
+              );
+            })()}
           </section>
         </div>
       </div>

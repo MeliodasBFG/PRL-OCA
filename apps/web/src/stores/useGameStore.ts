@@ -14,6 +14,7 @@ import {
   createInitialRoomState,
   disconnectPlayerFromState,
   executeTeacherCommandServerSide,
+  getRoomParticipantStats,
   isValidRoomCodeFormat,
   joinPlayerToState,
   normalizeRoomCode,
@@ -487,9 +488,19 @@ export const useGameStore = create<GameStore>((set, get) => {
         soundEngine.playSfx('dice_hit');
       }
 
+      const nextPlayerId = msg.yourPlayerId ?? get().playerId;
+      const nextPlayerToken = msg.playerToken ?? get().playerToken;
+      const nextTeacherToken = msg.teacherToken ?? get().teacherToken;
+
       if (msg.yourPlayerId) {
         persistSessionPlayerIdentity(msg.yourPlayerId);
-        mpClient.updateJoinPlayerId(msg.yourPlayerId, msg.playerToken);
+      }
+      if (nextPlayerId && (msg.yourPlayerId || msg.playerToken || msg.teacherToken)) {
+        mpClient.updateJoinPlayerId(
+          nextPlayerId,
+          nextPlayerToken ?? undefined,
+          nextTeacherToken ?? undefined
+        );
       }
       if (msg.playerToken && msg.state.roomCode) {
         persistSessionPlayerToken(msg.state.roomCode, msg.playerToken);
@@ -497,9 +508,9 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       set({
         roomState: { ...msg.state },
-        playerId: msg.yourPlayerId ?? get().playerId,
-        playerToken: msg.playerToken ?? get().playerToken,
-        teacherToken: msg.teacherToken ?? get().teacherToken,
+        playerId: nextPlayerId,
+        playerToken: nextPlayerToken,
+        teacherToken: nextTeacherToken,
         screen: nextScreen,
         errorMessage: null,
       });
@@ -542,12 +553,18 @@ export const useGameStore = create<GameStore>((set, get) => {
           screen: 'create_join',
           createJoinTab: 'join',
           errorMessage: formattedErr,
+          isRollingAnimation: false,
           isTokenMoving: false,
           challengeModalReady: true,
         });
         return;
       }
-      set({ errorMessage: formattedErr });
+      set({
+        errorMessage: formattedErr,
+        isRollingAnimation: false,
+        isTokenMoving: false,
+        challengeModalReady: true,
+      });
     }
   };
 
@@ -711,7 +728,9 @@ export const useGameStore = create<GameStore>((set, get) => {
         const hasNewerUpdate =
           data.state.status !== latest.status ||
           data.state.updatedAt > latest.updatedAt ||
-          data.state.players.length !== latest.players.length;
+          data.state.players.length !== latest.players.length ||
+          getRoomParticipantStats(data.state).connectedCount !==
+            getRoomParticipantStats(latest).connectedCount;
 
         if (!hasNewerUpdate) return;
 
@@ -745,9 +764,12 @@ export const useGameStore = create<GameStore>((set, get) => {
       let roomCode = `PRL${Math.floor(100 + Math.random() * 900)}`;
       let initialState = createInitialRoomState(roomCode, config);
       let token = cleanTeacherPin;
+      let serverPlayerId = get().playerId;
+      let serverPlayerToken = '';
       let createdOnServer = false;
       let serverError: string | null = null;
       let localWorkerUnreachableOnly = false;
+      const teacherDisplayName = teacherName.trim() || 'Docente PRL';
 
       if (!apiBase) {
         serverError =
@@ -760,7 +782,12 @@ export const useGameStore = create<GameStore>((set, get) => {
           const res = await fetch(targetUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config, teacherPin: cleanTeacherPin, teacherName }),
+            body: JSON.stringify({
+              config,
+              teacherPin: cleanTeacherPin,
+              teacherName: teacherDisplayName,
+              teacherId: serverPlayerId,
+            }),
             signal: controller.signal,
           });
           clearTimeout(timeout);
@@ -770,6 +797,8 @@ export const useGameStore = create<GameStore>((set, get) => {
             error?: string;
             message?: string;
             roomCode?: string;
+            playerId?: string;
+            playerToken?: string;
             teacherToken?: string;
             state?: GameRoomState;
           } | null;
@@ -778,6 +807,8 @@ export const useGameStore = create<GameStore>((set, get) => {
             roomCode = normalizeRoomCode(payload.roomCode);
             initialState = payload.state;
             token = payload.teacherToken ?? token;
+            serverPlayerId = payload.playerId ?? serverPlayerId;
+            serverPlayerToken = payload.playerToken ?? '';
             createdOnServer = true;
           } else {
             serverError = formatServerHttpDiagnostic({
@@ -815,25 +846,28 @@ export const useGameStore = create<GameStore>((set, get) => {
         });
         return;
       }
+
+      let resolvedPlayerId = serverPlayerId;
       if (!createdOnServer) {
         console.info('[PRL-OCA][Dev] Creando sala en modo desarrollo local (sin Worker activo).');
+        const joinRes = joinPlayerToState(initialState, {
+          playerId: serverPlayerId,
+          playerName: teacherDisplayName,
+          isTeacher: true,
+        });
+        resolvedPlayerId = joinRes.player?.id ?? serverPlayerId;
       }
-
-      const playerId = get().playerId;
-      const teacherDisplayName = teacherName.trim() || 'Docente PRL';
-      const joinRes = joinPlayerToState(initialState, {
-        playerId,
-        playerName: teacherDisplayName,
-        isTeacher: true,
-      });
-      const resolvedPlayerId = joinRes.player?.id ?? playerId;
       persistSessionPlayerIdentity(resolvedPlayerId, teacherDisplayName);
+      if (serverPlayerToken) {
+        persistSessionPlayerToken(roomCode, serverPlayerToken);
+      }
 
       set({
         roomState: { ...initialState },
         isRemoteSession: createdOnServer,
         playerId: resolvedPlayerId,
         playerName: teacherDisplayName,
+        playerToken: serverPlayerToken,
         isTeacher: true,
         isSpectator: false,
         teacherPin: cleanTeacherPin,
@@ -853,6 +887,8 @@ export const useGameStore = create<GameStore>((set, get) => {
           playerName: teacherDisplayName,
           isTeacher: true,
           teacherPin: cleanTeacherPin,
+          teacherToken: token || undefined,
+          playerToken: serverPlayerToken || undefined,
         },
         (msg: ServerToClientMessage) => handleServerMessage(msg),
         (status) => set({ connectionStatus: status }),
@@ -1003,22 +1039,23 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const joinRes = joinPlayerToState(state, {
-        playerId: resolvedPlayerId,
-        playerName: cleanAlias,
-        preferredTeamId,
-        isTeacher,
-        isSpectator,
-      });
-
-      if (!joinRes.ok) {
-        set({
-          errorMessage: mapRoomErrorMessage(joinRes.errorCode, joinRes.error),
+      if (!loadedFromServer) {
+        const joinRes = joinPlayerToState(state, {
+          playerId: resolvedPlayerId,
+          playerName: cleanAlias,
+          preferredTeamId,
+          isTeacher,
+          isSpectator,
         });
-        return;
-      }
 
-      resolvedPlayerId = joinRes.player?.id ?? resolvedPlayerId;
+        if (!joinRes.ok) {
+          set({
+            errorMessage: mapRoomErrorMessage(joinRes.errorCode, joinRes.error),
+          });
+          return;
+        }
+        resolvedPlayerId = joinRes.player?.id ?? resolvedPlayerId;
+      }
       persistSessionPlayerIdentity(resolvedPlayerId, cleanAlias);
       persistSessionPlayerToken(cleanCode, resolvedPlayerToken);
 
@@ -1052,6 +1089,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           isTeacher,
           isSpectator,
           teacherPin,
+          teacherToken: resolvedTeacherToken || undefined,
           playerToken: resolvedPlayerToken || undefined,
         },
         (msg) => handleServerMessage(msg),
@@ -1205,17 +1243,44 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.playSfx('button_click');
 
       const playerId = get().playerId;
+      const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const msg = {
+        type: 'SELECT_TEAM' as const,
+        actionId: `sel_${Date.now()}`,
+        playerId,
+        teamId,
+        playerToken: pToken,
+      };
       if (mpClient.isConnected() && get().connectionStatus === 'connected') {
-        mpClient.send({
-          type: 'SELECT_TEAM',
-          actionId: `sel_${Date.now()}`,
-          playerId,
-          teamId,
-        });
+        mpClient.send(msg);
         return;
       }
 
-      if (get().isRemoteSession || !isLocalFallbackEnabled()) {
+      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
+        const apiBase = resolveApiBaseUrl();
+        if (apiBase && pToken) {
+          void fetch(`${apiBase}/api/rooms/${normalizeRoomCode(state.roomCode)}/action`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Player-Token': pToken,
+            },
+            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
+          })
+            .then((r) => r.json().catch(() => null))
+            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
+              if (data?.ok && data.event) {
+                handleServerMessage(data.event);
+              } else if (data?.message) {
+                set({ errorMessage: data.message });
+              }
+            })
+            .catch(() => {
+              mpClient.forceReconnectIfNeeded();
+              set({ errorMessage: 'Reconectando con la sala en Cloudflare para cambiar de equipo...' });
+            });
+          return;
+        }
         mpClient.forceReconnectIfNeeded();
         set({
           errorMessage: 'Reconectando con la sala en Cloudflare para cambiar de equipo...',
@@ -1238,16 +1303,43 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.playSfx('button_click');
 
       const playerId = get().playerId;
+      const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const msg = {
+        type: 'TOGGLE_READY' as const,
+        actionId: `rdy_${Date.now()}`,
+        playerId,
+        playerToken: pToken,
+      };
       if (mpClient.isConnected() && get().connectionStatus === 'connected') {
-        mpClient.send({
-          type: 'TOGGLE_READY',
-          actionId: `rdy_${Date.now()}`,
-          playerId,
-        });
+        mpClient.send(msg);
         return;
       }
 
-      if (get().isRemoteSession || !isLocalFallbackEnabled()) {
+      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
+        const apiBase = resolveApiBaseUrl();
+        if (apiBase && pToken) {
+          void fetch(`${apiBase}/api/rooms/${normalizeRoomCode(state.roomCode)}/action`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Player-Token': pToken,
+            },
+            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
+          })
+            .then((r) => r.json().catch(() => null))
+            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
+              if (data?.ok && data.event) {
+                handleServerMessage(data.event);
+              } else if (data?.message) {
+                set({ errorMessage: data.message });
+              }
+            })
+            .catch(() => {
+              mpClient.forceReconnectIfNeeded();
+              set({ errorMessage: 'Reconectando con la sala en Cloudflare para actualizar tu estado...' });
+            });
+          return;
+        }
         mpClient.forceReconnectIfNeeded();
         set({
           errorMessage: 'Reconectando con la sala en Cloudflare para actualizar tu estado...',
@@ -1279,29 +1371,93 @@ export const useGameStore = create<GameStore>((set, get) => {
       }));
 
       const playerId = get().playerId;
+      const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
 
       // 1.15s of 3D dice tumbling before settling on the server-determined face
       setTimeout(() => {
-        if (get().connectionStatus === 'connected') {
-          mpClient.send({
-            type: 'ROLL_DICE',
-            actionId: `roll_${Date.now()}`,
-            playerId,
-          });
-          return;
-        }
-
-        const currentState = get().roomState;
-        if (!currentState) {
+        const curRoom = get().roomState;
+        if (!curRoom) {
           set({ isRollingAnimation: false, challengeModalReady: true });
           return;
         }
 
-        const activeTeam = currentState.teams[currentState.activeTeamIndex];
-        const effectiveRoller =
-          currentState.players.find((p) => p.teamId === activeTeam?.id)?.id ?? playerId;
+        const msg = {
+          type: 'ROLL_DICE' as const,
+          actionId: `roll_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          playerId,
+          playerToken: pToken,
+        };
 
-        const res = rollDiceServerSide(currentState, effectiveRoller, get().questionBank);
+        if (mpClient.isConnected() && get().connectionStatus === 'connected') {
+          if (mpClient.send(msg)) {
+            return;
+          }
+        }
+
+        // Authoritative HTTP fallback when playing remotely (NEVER silently run local fallback)
+        if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
+          const apiBase = resolveApiBaseUrl();
+          const roomCode = normalizeRoomCode(curRoom.roomCode);
+          if (!apiBase || !pToken) {
+            mpClient.forceReconnectIfNeeded();
+            set({
+              isRollingAnimation: false,
+              isTokenMoving: false,
+              challengeModalReady: true,
+              errorMessage:
+                'Reconectando credenciales con el servidor Cloudflare Workers. Inténtalo de nuevo en un instante.',
+            });
+            return;
+          }
+          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Player-Token': pToken,
+            },
+            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
+          })
+            .then(async (res) => {
+              const data = (await res.json().catch(() => null)) as {
+                ok?: boolean;
+                error?: string;
+                message?: string;
+                event?: ServerToClientMessage;
+              } | null;
+              if (res.ok && data?.ok && data.event) {
+                handleServerMessage(data.event);
+              } else {
+                set({
+                  isRollingAnimation: false,
+                  isTokenMoving: false,
+                  challengeModalReady: true,
+                  errorMessage: formatServerHttpDiagnostic({
+                    status: res.status,
+                    errorCode: data?.error,
+                    serverMessage: data?.message ?? data?.error ?? 'No se pudo lanzar el dado.',
+                    targetUrl: `${apiBase}/api/rooms/${roomCode}/action`,
+                    origin: typeof window !== 'undefined' ? window.location.origin : undefined,
+                  }),
+                });
+              }
+            })
+            .catch(() => {
+              set({
+                isRollingAnimation: false,
+                isTokenMoving: false,
+                challengeModalReady: true,
+                errorMessage:
+                  'Error de red al enviar el lanzamiento de dados al servidor Cloudflare Workers.',
+              });
+            });
+          return;
+        }
+
+        const activeTeam = curRoom.teams[curRoom.activeTeamIndex];
+        const effectiveRoller =
+          curRoom.players.find((p) => p.teamId === activeTeam?.id)?.id ?? playerId;
+
+        const res = rollDiceServerSide(curRoom, effectiveRoller, get().questionBank);
         if (!res.ok) {
           set({
             isRollingAnimation: false,
@@ -1314,13 +1470,13 @@ export const useGameStore = create<GameStore>((set, get) => {
 
         soundEngine.playSfx('dice_hit');
         set({
-          roomState: { ...currentState },
+          roomState: { ...curRoom },
           isRollingAnimation: false,
           isTokenMoving: true,
           challengeModalReady: false,
         });
-        scheduleMovementSequence(currentState);
-        mpClient.broadcastLocalState(currentState);
+        scheduleMovementSequence(curRoom);
+        mpClient.broadcastLocalState(curRoom);
       }, 1150);
     },
 
@@ -1329,14 +1485,46 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (!state) return;
 
       const playerId = get().playerId;
-      if (get().connectionStatus === 'connected') {
-        mpClient.send({
-          type: 'SUBMIT_ANSWER',
-          actionId: `ans_${Date.now()}`,
-          playerId,
-          selectedIndices,
-          collaborated,
-        });
+      const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const msg = {
+        type: 'SUBMIT_ANSWER' as const,
+        actionId: `ans_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        playerId,
+        selectedIndices,
+        collaborated,
+        playerToken: pToken,
+      };
+      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
+        if (mpClient.send(msg)) return;
+      }
+
+      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
+        const apiBase = resolveApiBaseUrl();
+        const roomCode = normalizeRoomCode(state.roomCode);
+        if (apiBase && pToken) {
+          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Player-Token': pToken,
+            },
+            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
+          })
+            .then((r) => r.json().catch(() => null))
+            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
+              if (data?.ok && data.event) {
+                handleServerMessage(data.event);
+              } else if (data?.message) {
+                set({ errorMessage: data.message });
+              }
+            })
+            .catch(() => {
+              set({ errorMessage: 'No se pudo enviar la respuesta al servidor Cloudflare Workers.' });
+            });
+        } else {
+          mpClient.forceReconnectIfNeeded();
+          set({ errorMessage: 'Reconectando con la sala para enviar tu respuesta...' });
+        }
         return;
       }
 
@@ -1381,13 +1569,45 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (!state) return;
 
       const playerId = get().playerId;
-      if (get().connectionStatus === 'connected') {
-        mpClient.send({
-          type: 'COMPLETE_CHALLENGE_3D',
-          actionId: `ch3d_${Date.now()}`,
-          playerId,
-          selectedHotspotIds,
-        });
+      const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const msg = {
+        type: 'COMPLETE_CHALLENGE_3D' as const,
+        actionId: `ch3d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        playerId,
+        selectedHotspotIds,
+        playerToken: pToken,
+      };
+      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
+        if (mpClient.send(msg)) return;
+      }
+
+      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
+        const apiBase = resolveApiBaseUrl();
+        const roomCode = normalizeRoomCode(state.roomCode);
+        if (apiBase && pToken) {
+          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Player-Token': pToken,
+            },
+            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
+          })
+            .then((r) => r.json().catch(() => null))
+            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
+              if (data?.ok && data.event) {
+                handleServerMessage(data.event);
+              } else if (data?.message) {
+                set({ errorMessage: data.message });
+              }
+            })
+            .catch(() => {
+              set({ errorMessage: 'No se pudo validar el desafío 3D en Cloudflare Workers.' });
+            });
+        } else {
+          mpClient.forceReconnectIfNeeded();
+          set({ errorMessage: 'Reconectando con la sala para completar el desafío...' });
+        }
         return;
       }
 
@@ -1419,12 +1639,44 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.playMusic('board');
 
       const playerId = get().playerId;
-      if (get().connectionStatus === 'connected') {
-        mpClient.send({
-          type: 'NEXT_TURN',
-          actionId: `nxt_${Date.now()}`,
-          playerId,
-        });
+      const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const msg = {
+        type: 'NEXT_TURN' as const,
+        actionId: `nxt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        playerId,
+        playerToken: pToken,
+      };
+      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
+        if (mpClient.send(msg)) return;
+      }
+
+      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
+        const apiBase = resolveApiBaseUrl();
+        const roomCode = normalizeRoomCode(state.roomCode);
+        if (apiBase && pToken) {
+          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Player-Token': pToken,
+            },
+            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
+          })
+            .then((r) => r.json().catch(() => null))
+            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
+              if (data?.ok && data.event) {
+                handleServerMessage(data.event);
+              } else if (data?.message) {
+                set({ errorMessage: data.message });
+              }
+            })
+            .catch(() => {
+              set({ errorMessage: 'No se pudo avanzar el turno en el servidor Cloudflare Workers.' });
+            });
+        } else {
+          mpClient.forceReconnectIfNeeded();
+          set({ errorMessage: 'Reconectando con la sala para avanzar de turno...' });
+        }
         return;
       }
 

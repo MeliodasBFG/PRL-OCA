@@ -177,12 +177,17 @@ export class MultiplayerClient {
     return false;
   }
 
-  public updateJoinPlayerId(playerId: string, playerToken?: string): void {
+  public updateJoinPlayerId(
+    playerId: string,
+    playerToken?: string,
+    teacherToken?: string
+  ): void {
     if (this.joinPayload) {
       this.joinPayload = {
         ...this.joinPayload,
         playerId,
         ...(playerToken ? { playerToken } : {}),
+        ...(teacherToken ? { teacherToken } : {}),
       };
     }
   }

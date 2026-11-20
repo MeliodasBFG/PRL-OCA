@@ -85,6 +85,8 @@ export const CreateRoomRequestSchema = z.object({
   config: GameConfigSchema.partial().optional(),
   teacherPin: z.string().min(4).max(32),
   teacherName: z.string().min(2).max(40).default('Docente PRL'),
+  teacherId: z.string().min(1).max(64).optional(),
+  teacherParticipatesAsPlayer: z.boolean().optional(),
 });
 
 export const JoinRoomRequestSchema = z.object({
@@ -94,6 +96,7 @@ export const JoinRoomRequestSchema = z.object({
   preferredTeamId: z.string().optional(),
   isTeacher: z.boolean().optional(),
   isSpectator: z.boolean().optional(),
+  participatesAsPlayer: z.boolean().optional(),
   teacherPin: z.string().optional(),
   playerToken: z.string().optional(),
 });
@@ -154,24 +157,29 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     preferredTeamId: z.string().optional(),
     isTeacher: z.boolean().optional(),
     isSpectator: z.boolean().optional(),
+    participatesAsPlayer: z.boolean().optional(),
     teacherPin: z.string().optional(),
+    teacherToken: z.string().optional(),
     playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('TOGGLE_READY'),
     actionId: z.string().min(1).max(64),
     playerId: z.string().min(1).max(64),
+    playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('SELECT_TEAM'),
     actionId: z.string().min(1).max(64),
     playerId: z.string().min(1).max(64),
     teamId: z.string().min(1).max(32),
+    playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('ROLL_DICE'),
     actionId: z.string().min(1).max(64),
     playerId: z.string().min(1).max(64),
+    playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('SUBMIT_ANSWER'),
@@ -179,17 +187,20 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     playerId: z.string().min(1).max(64),
     selectedIndices: z.array(z.number().int().min(0).max(10)).min(1),
     collaborated: z.boolean().optional(),
+    playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('COMPLETE_CHALLENGE_3D'),
     actionId: z.string().min(1).max(64),
     playerId: z.string().min(1).max(64),
     selectedHotspotIds: z.array(z.string().min(1)).min(1),
+    playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('NEXT_TURN'),
     actionId: z.string().min(1).max(64),
     playerId: z.string().min(1).max(64),
+    playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('TEACHER_ACTION'),

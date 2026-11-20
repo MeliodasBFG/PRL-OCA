@@ -10,7 +10,11 @@ import {
   Users,
   Wifi,
 } from 'lucide-react';
-import { TEAM_ROLE_INFO } from '@prl-oca/shared';
+import {
+  TEAM_ROLE_INFO,
+  getRoomParticipantStats,
+  isPlayerCountedAsParticipant,
+} from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 import { LobbyScene3D } from '../scenes/LobbyScene3D';
 import { mpClient } from '../multiplayer/wsClient';
@@ -71,7 +75,8 @@ export const LobbyScreen: React.FC = () => {
 
   if (!roomState) return null;
 
-  const activeParticipants = roomState.players.filter((p) => !p.isTeacher && !p.isSpectator);
+  const activeParticipants = roomState.players.filter(isPlayerCountedAsParticipant);
+  const participantStats = getRoomParticipantStats(roomState);
   const myPlayer = roomState.players.find((p) => p.id === playerId);
   const connectionLabel =
     connectionStatus === 'connected'
@@ -92,8 +97,16 @@ export const LobbyScreen: React.FC = () => {
             <h1>{roomState.config.roomName}</h1>
             <div className="lobby-meta-pills">
               <span className="meta-pill">
-                <Users size={15} /> {activeParticipants.length} / {roomState.config.maxPlayers}{' '}
-                Participantes
+                <Users size={15} /> Conectados: {participantStats.connectedCount} /{' '}
+                {participantStats.maxPlayers}
+                {participantStats.disconnectedCount > 0
+                  ? ` (${participantStats.registeredCount} reg., ${participantStats.disconnectedCount} desc.)`
+                  : ''}
+              </span>
+              <span className="meta-pill">
+                {participantStats.teacherConnected
+                  ? 'Docente conectado'
+                  : 'Docente reconectando'}
               </span>
               <span className="meta-pill">
                 <Wifi size={15} /> {connectionLabel}

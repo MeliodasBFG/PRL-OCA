@@ -192,6 +192,9 @@ export default {
             const id = env.GAME_ROOMS.idFromName(roomCode);
             const stub = env.GAME_ROOMS.get(id);
 
+            const resolvedTeacherId =
+              parsed.data.teacherId?.trim() || `teacher_${crypto.randomUUID().slice(0, 8)}`;
+
             const initRes = await stub.fetch(
               new Request(`https://internal/init?roomCode=${roomCode}`, {
                 method: 'POST',
@@ -200,6 +203,9 @@ export default {
                   roomCode,
                   config: parsed.data.config,
                   teacherPin: parsed.data.teacherPin,
+                  teacherName: parsed.data.teacherName,
+                  teacherId: resolvedTeacherId,
+                  teacherParticipatesAsPlayer: parsed.data.teacherParticipatesAsPlayer,
                 }),
               })
             );
@@ -269,6 +275,34 @@ export default {
           new Request(`https://internal/join?roomCode=${check.roomCode}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            body: rawBody,
+          })
+        );
+        const data = await res.text();
+        return new Response(data, {
+          status: res.status,
+          headers: { ...cors, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Authoritative HTTP fallback for Participant Gameplay Actions -> POST /api/rooms/:code/action
+      const playerActionMatch = pathname.match(/^\/api\/rooms\/([^/]+)\/action$/);
+      if (request.method === 'POST' && playerActionMatch) {
+        const check = safeDecodeAndValidateRoomCode(playerActionMatch[1]);
+        if (!check.ok) {
+          return workerJsonError(400, check.error, check.message, cors);
+        }
+        const id = env.GAME_ROOMS.idFromName(check.roomCode);
+        const stub = env.GAME_ROOMS.get(id);
+        const rawBody = await request.text();
+        console.log(`[Worker] Forwarding HTTP gameplay /action roomCode=${check.roomCode}`);
+        const res = await stub.fetch(
+          new Request(`https://internal/action?roomCode=${check.roomCode}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Player-Token': request.headers.get('X-Player-Token') ?? '',
+            },
             body: rawBody,
           })
         );

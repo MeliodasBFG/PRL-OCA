@@ -173,6 +173,9 @@ export class GameRoom {
         roomCode?: string;
         config?: Partial<GameConfig>;
         teacherPin?: string;
+        teacherName?: string;
+        teacherId?: string;
+        teacherParticipatesAsPlayer?: boolean;
       };
       const code = normalizeRoomCode(body.roomCode ?? roomCode);
       if (!isValidRoomCodeFormat(code)) {
@@ -200,6 +203,28 @@ export class GameRoom {
 
       this.teacherPin = body.teacherPin?.trim() || crypto.randomUUID().slice(0, 8);
       this.stateData = createInitialRoomState(code, body.config);
+
+      let resolvedTeacherId: string | undefined;
+      let playerToken: string | undefined;
+      if (body.teacherId?.trim() || body.teacherName?.trim()) {
+        resolvedTeacherId =
+          body.teacherId?.trim() || `teacher_${crypto.randomUUID().slice(0, 8)}`;
+        const teacherName = body.teacherName?.trim() || 'Docente PRL';
+        joinPlayerToState(this.stateData, {
+          playerId: resolvedTeacherId,
+          playerName: teacherName,
+          isTeacher: true,
+          participatesAsPlayer: Boolean(body.teacherParticipatesAsPlayer),
+        });
+        await this.ctx.storage.put('teacher_id', resolvedTeacherId);
+        playerToken = createPlayerToken(
+          code,
+          resolvedTeacherId,
+          this.teacherPin,
+          this.env.TEACHER_TOKEN_SECRET
+        );
+      }
+
       await this.ctx.storage.put('room_initialized', true);
       await this.ctx.storage.put('room_closed', false);
       await this.ctx.storage.put('room_code', code);
@@ -210,12 +235,16 @@ export class GameRoom {
         this.teacherPin,
         this.env.TEACHER_TOKEN_SECRET
       );
-      console.log(`[DO:${code}] Room initialized (maxPlayers=${this.stateData.config.maxPlayers})`);
+      console.log(
+        `[DO:${code}] Room initialized (maxPlayers=${this.stateData.config.maxPlayers}, teacherRegistered=${Boolean(resolvedTeacherId)})`
+      );
       return new Response(
         JSON.stringify({
           success: true,
           ok: true,
           roomCode: code,
+          playerId: resolvedTeacherId,
+          playerToken,
           teacherToken,
           state: this.stateData,
         }),
@@ -282,7 +311,8 @@ export class GameRoom {
       }
 
       const reqData = parsedJoin.data;
-      const requestedPlayerId = reqData.playerId?.trim() || `plr_${crypto.randomUUID().slice(0, 8)}`;
+      const requestedPlayerId =
+        reqData.playerId?.trim() || `plr_${crypto.randomUUID().slice(0, 8)}`;
       const wantTeacher = Boolean(reqData.isTeacher);
       const wantSpectator = Boolean(reqData.isSpectator);
 
@@ -308,6 +338,7 @@ export class GameRoom {
         playerName: reqData.playerName,
         isTeacher: wantTeacher,
         isSpectator: wantSpectator,
+        participatesAsPlayer: reqData.participatesAsPlayer,
       });
 
       if (!eligibility.ok) {
@@ -326,7 +357,66 @@ export class GameRoom {
         );
       }
 
-      const resolvedPlayerId = eligibility.existingPlayer?.id ?? requestedPlayerId;
+      const existing = eligibility.existingPlayer;
+      if (existing) {
+        if (reqData.playerToken) {
+          const tokenValid = verifyPlayerToken(
+            reqData.playerToken,
+            loaded.state.roomCode,
+            existing.id,
+            this.teacherPin,
+            this.env.TEACHER_TOKEN_SECRET
+          );
+          if (!tokenValid) {
+            return this.jsonError(
+              401,
+              'INVALID_PLAYER_TOKEN',
+              'Token de participante inválido o perteneciente a otro jugador.',
+              cors
+            );
+          }
+        } else if (
+          existing.id === requestedPlayerId &&
+          !wantTeacher &&
+          this.hasOpenSocketForPlayer(existing.id)
+        ) {
+          return this.jsonError(
+            403,
+            'UNAUTHORIZED_PLAYER',
+            'Ese participante ya tiene una sesión activa en curso.',
+            cors
+          );
+        }
+      } else if (reqData.playerToken) {
+        // Cannot join as a brand new identity while presenting someone else's token
+        return this.jsonError(
+          401,
+          'INVALID_PLAYER_TOKEN',
+          'Token de participante no válido para un nuevo registro.',
+          cors
+        );
+      }
+
+      // Authoritatively register or reconnect participant on the Durable Object immediately on HTTP /join
+      const joinRes = joinPlayerToState(loaded.state, {
+        playerId: existing?.id ?? requestedPlayerId,
+        playerName: reqData.playerName,
+        preferredTeamId: reqData.preferredTeamId,
+        isTeacher: wantTeacher,
+        isSpectator: wantSpectator,
+        participatesAsPlayer: reqData.participatesAsPlayer,
+      });
+
+      if (!joinRes.ok || !joinRes.player) {
+        return this.jsonError(
+          403,
+          joinRes.errorCode ?? 'JOIN_REJECTED',
+          joinRes.error ?? 'No fue posible registrar al participante en la sala.',
+          cors
+        );
+      }
+
+      const resolvedPlayerId = joinRes.player.id;
       const playerToken = createPlayerToken(
         loaded.state.roomCode,
         resolvedPlayerId,
@@ -334,8 +424,11 @@ export class GameRoom {
         this.env.TEACHER_TOKEN_SECRET
       );
 
+      await this.persist();
+      this.broadcast({ type: 'STATE_SYNC', state: loaded.state });
+
       console.log(
-        `[DO:${loaded.state.roomCode}] HTTP /join verified playerId=${resolvedPlayerId} reconnected=${Boolean(eligibility.existingPlayer)} status=${loaded.state.status}`
+        `[DO:${loaded.state.roomCode}] HTTP /join registered playerId=${resolvedPlayerId} reconnected=${Boolean(joinRes.reconnected)} players=${loaded.state.players.length} status=${loaded.state.status}`
       );
 
       return new Response(
@@ -346,7 +439,72 @@ export class GameRoom {
           playerId: resolvedPlayerId,
           playerToken,
           teacherToken: issuedTeacherToken,
-          reconnected: Boolean(eligibility.existingPlayer),
+          reconnected: Boolean(joinRes.reconnected),
+          state: loaded.state,
+        }),
+        { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Authoritative HTTP fallback for authenticated player gameplay actions -> POST /action
+    if (request.method === 'POST' && url.pathname.endsWith('/action')) {
+      const loaded = await this.loadVerifiedExistingRoom(roomCode);
+      if (!loaded.ok) {
+        return this.jsonError(loaded.status, loaded.error, loaded.message, cors);
+      }
+      if (loaded.closed) {
+        return this.jsonError(
+          410,
+          'ROOM_CLOSED',
+          'Esta partida ha sido cerrada por el profesor.',
+          cors
+        );
+      }
+
+      const rawBody = (await request.json().catch(() => null)) as {
+        playerId?: string;
+        playerToken?: string;
+        message?: unknown;
+      } | null;
+      const headerToken = request.headers.get('X-Player-Token')?.trim();
+      const parsedAction = ClientMessageSchema.safeParse(rawBody?.message ?? rawBody);
+      if (!parsedAction.success) {
+        return this.jsonError(400, 'VALIDATION_ERROR', 'Acción de juego inválida.', cors);
+      }
+      const actionMsg = parsedAction.data;
+      if (
+        actionMsg.type === 'PING' ||
+        actionMsg.type === 'JOIN_ROOM' ||
+        actionMsg.type === 'TEACHER_ACTION'
+      ) {
+        return this.jsonError(400, 'INVALID_GAME_ACTION', 'Tipo de acción no soportada en /action.', cors);
+      }
+
+      const suppliedToken =
+        ('playerToken' in actionMsg ? actionMsg.playerToken : undefined) ||
+        rawBody?.playerToken?.trim() ||
+        headerToken;
+      if (!suppliedToken) {
+        return this.jsonError(
+          401,
+          'INVALID_PLAYER_TOKEN',
+          'Se requiere token de participante para ejecutar acciones por HTTP.',
+          cors
+        );
+      }
+
+      const authRes = await this.executeValidatedGameplayAction(null, loaded.state, {
+        ...actionMsg,
+        playerToken: suppliedToken,
+      });
+      if (!authRes.ok) {
+        return this.jsonError(authRes.status, authRes.code, authRes.message, cors);
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          ok: true,
+          event: authRes.event,
           state: loaded.state,
         }),
         { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } }
@@ -627,19 +785,39 @@ export class GameRoom {
     return undefined;
   }
 
+  private hasOpenSocketForPlayer(playerId: string, excludeWs?: WebSocket): boolean {
+    return this.getActiveSockets().some((sock) => {
+      if (excludeWs && sock === excludeWs) return false;
+      const att = this.getSocketAttachment(sock);
+      if (att?.playerId !== playerId) return false;
+      if ('readyState' in sock && typeof sock.readyState === 'number') {
+        return sock.readyState === 1;
+      }
+      return true;
+    });
+  }
+
   public async handleValidatedMessage(
     ws: WebSocket,
     state: GameRoomState,
     msg: Exclude<ClientToServerMessage, { type: 'PING' }>
   ): Promise<void> {
-    const db = new DatabaseService(this.env.DB);
-
     switch (msg.type) {
       case 'JOIN_ROOM': {
         let verifiedTeacher = false;
         let issuedToken: string | undefined;
         if (msg.isTeacher) {
-          if (msg.teacherPin === this.teacherPin) {
+          const validPin = Boolean(msg.teacherPin && msg.teacherPin === this.teacherPin);
+          const validTok = Boolean(
+            msg.teacherToken &&
+              verifyTeacherToken(
+                msg.teacherToken,
+                state.roomCode,
+                this.teacherPin,
+                this.env.TEACHER_TOKEN_SECRET
+              )
+          );
+          if (validPin || validTok) {
             verifiedTeacher = true;
             issuedToken = createTeacherToken(
               state.roomCode,
@@ -656,11 +834,28 @@ export class GameRoom {
           }
         }
 
+        const eligibility = evaluateJoinEligibility(state, {
+          playerId: msg.playerId,
+          playerName: msg.playerName,
+          isTeacher: verifiedTeacher,
+          isSpectator: msg.isSpectator,
+          participatesAsPlayer: msg.participatesAsPlayer,
+        });
+        if (!eligibility.ok) {
+          this.sendToSocket(ws, {
+            type: 'ERROR',
+            code: eligibility.errorCode ?? 'JOIN_REJECTED',
+            message: eligibility.error ?? 'No se pudo unir a la sala.',
+          });
+          return;
+        }
+
+        const existingTargetId = eligibility.existingPlayer?.id ?? msg.playerId;
         if (msg.playerToken) {
           const validP = verifyPlayerToken(
             msg.playerToken,
             state.roomCode,
-            msg.playerId,
+            existingTargetId,
             this.teacherPin,
             this.env.TEACHER_TOKEN_SECRET
           );
@@ -672,17 +867,30 @@ export class GameRoom {
             });
             return;
           }
+        } else if (
+          eligibility.existingPlayer &&
+          eligibility.existingPlayer.id === msg.playerId &&
+          !verifiedTeacher &&
+          this.hasOpenSocketForPlayer(eligibility.existingPlayer.id, ws)
+        ) {
+          this.sendToSocket(ws, {
+            type: 'ERROR',
+            code: 'UNAUTHORIZED_PLAYER',
+            message: 'Este jugador ya está conectado desde otra sesión activa.',
+          });
+          return;
         }
 
         const joinRes = joinPlayerToState(state, {
-          playerId: msg.playerId,
+          playerId: existingTargetId,
           playerName: msg.playerName,
           preferredTeamId: msg.preferredTeamId,
           isTeacher: verifiedTeacher,
           isSpectator: msg.isSpectator,
+          participatesAsPlayer: msg.participatesAsPlayer,
         });
 
-        if (!joinRes.ok) {
+        if (!joinRes.ok || !joinRes.player) {
           this.sendToSocket(ws, {
             type: 'ERROR',
             code: joinRes.errorCode ?? 'JOIN_REJECTED',
@@ -691,29 +899,13 @@ export class GameRoom {
           return;
         }
 
-        const resolvedPlayerId = joinRes.player?.id ?? msg.playerId;
+        const resolvedPlayerId = joinRes.player.id;
         const playerToken = createPlayerToken(
           state.roomCode,
           resolvedPlayerId,
           this.teacherPin,
           this.env.TEACHER_TOKEN_SECRET
         );
-
-        // Transfer ownership cleanly away from any previous dead/stale sockets for this player
-        for (const otherWs of this.getActiveSockets()) {
-          if (otherWs === ws) continue;
-          const otherAtt = this.getSocketAttachment(otherWs);
-          if (otherAtt?.playerId === resolvedPlayerId) {
-            this.socketPlayers.delete(otherWs);
-            if (typeof otherWs.serializeAttachment === 'function') {
-              try {
-                otherWs.serializeAttachment({ playerId: '' });
-              } catch {
-                // Ignore
-              }
-            }
-          }
-        }
 
         this.setSocketAttachment(ws, {
           playerId: resolvedPlayerId,
@@ -744,126 +936,21 @@ export class GameRoom {
         break;
       }
 
-      case 'TOGGLE_READY': {
-        const p = state.players.find((pl) => pl.id === msg.playerId);
-        if (p) {
-          p.ready = !p.ready;
-          state.updatedAt = Date.now();
-          await this.persist();
-          this.broadcast({ type: 'STATE_SYNC', state });
-        }
-        break;
-      }
-
-      case 'SELECT_TEAM': {
-        if (state.status !== 'lobby') {
-          this.sendToSocket(ws, {
-            type: 'ERROR',
-            code: 'GAME_ALREADY_STARTED',
-            message: 'Solo se puede cambiar de equipo en la sala de espera.',
-          });
-          return;
-        }
-        const player = state.players.find((pl) => pl.id === msg.playerId);
-        const team = state.teams.find((t) => t.id === msg.teamId);
-        if (player && team) {
-          player.teamId = team.id;
-          refreshAllTeamRoles(state);
-          state.updatedAt = Date.now();
-          await this.persist();
-          this.broadcast({ type: 'STATE_SYNC', state });
-        }
-        break;
-      }
-
-      case 'ROLL_DICE': {
-        const questions = await db.getQuestions();
-        const rollRes = rollDiceServerSide(state, msg.playerId, questions);
-        if (!rollRes.ok || !rollRes.roll) {
-          this.sendToSocket(ws, {
-            type: 'ERROR',
-            code: 'INVALID_ROLL',
-            message: rollRes.error ?? 'Acción de dados no permitida.',
-          });
-          return;
-        }
-        await this.persist();
-        this.broadcast({
-          type: 'DICE_ROLLED',
-          roll: rollRes.roll,
-          state,
-        });
-        break;
-      }
-
-      case 'SUBMIT_ANSWER': {
-        const ansRes = submitAnswerServerSide(
-          state,
-          msg.playerId,
-          msg.selectedIndices,
-          msg.collaborated ?? true
-        );
-        if (!ansRes.ok) {
-          this.sendToSocket(ws, {
-            type: 'ERROR',
-            code: 'INVALID_ANSWER',
-            message: ansRes.error ?? 'No se pudo procesar la respuesta.',
-          });
-          return;
-        }
-        if (state.status === 'finished') {
-          await db.saveMatchHistory(buildMatchHistoryFromState(state));
-        }
-        await this.persist();
-        this.broadcast({
-          type: 'ANSWER_RESULT',
-          isCorrect: Boolean(ansRes.isCorrect),
-          pointsAwarded: ansRes.pointsAwarded ?? 0,
-          unlockedBadges: ansRes.unlockedBadges ?? [],
-          state,
-        });
-        break;
-      }
-
-      case 'COMPLETE_CHALLENGE_3D': {
-        const chRes = completeChallenge3DServerSide(
-          state,
-          msg.playerId,
-          msg.selectedHotspotIds
-        );
-        if (!chRes.ok) {
-          this.sendToSocket(ws, {
-            type: 'ERROR',
-            code: 'INVALID_CHALLENGE',
-            message: chRes.error ?? 'No se pudo completar el desafío 3D.',
-          });
-          return;
-        }
-        await this.persist();
-        this.broadcast({
-          type: 'ANSWER_RESULT',
-          isCorrect: Boolean(chRes.isCorrect),
-          pointsAwarded: chRes.pointsAwarded ?? 0,
-          unlockedBadges: chRes.unlockedBadges ?? [],
-          state,
-        });
-        break;
-      }
-
+      case 'TOGGLE_READY':
+      case 'SELECT_TEAM':
+      case 'ROLL_DICE':
+      case 'SUBMIT_ANSWER':
+      case 'COMPLETE_CHALLENGE_3D':
       case 'NEXT_TURN': {
-        const activeTeam = state.teams[state.activeTeamIndex];
-        const player = state.players.find((p) => p.id === msg.playerId);
-        if (!player || (!player.isTeacher && player.teamId !== activeTeam?.id)) {
+        const res = await this.executeValidatedGameplayAction(ws, state, msg);
+        if (!res.ok) {
           this.sendToSocket(ws, {
             type: 'ERROR',
-            code: 'UNAUTHORIZED_TURN',
-            message: 'Solo el equipo activo o el docente pueden avanzar al siguiente turno.',
+            code: res.code,
+            message: res.message,
           });
           return;
         }
-        advanceTurnServerSide(state);
-        await this.persist();
-        this.broadcast({ type: 'STATE_SYNC', state });
         break;
       }
 
@@ -884,6 +971,209 @@ export class GameRoom {
           return;
         }
         break;
+      }
+    }
+  }
+
+  private async executeValidatedGameplayAction(
+    ws: WebSocket | null,
+    state: GameRoomState,
+    msg: Extract<
+      ClientToServerMessage,
+      {
+        type:
+          | 'TOGGLE_READY'
+          | 'SELECT_TEAM'
+          | 'ROLL_DICE'
+          | 'SUBMIT_ANSWER'
+          | 'COMPLETE_CHALLENGE_3D'
+          | 'NEXT_TURN';
+      }
+    >
+  ): Promise<
+    | { ok: true; event: ServerToClientMessage }
+    | { ok: false; status: number; code: string; message: string }
+  > {
+    const db = new DatabaseService(this.env.DB);
+    const socketAtt = ws ? this.getSocketAttachment(ws) : undefined;
+
+    // 1. Validate socket attachment matches target playerId (prevents spoofing another playerId on open socket)
+    if (ws && socketAtt?.playerId && socketAtt.playerId !== msg.playerId) {
+      console.warn(
+        `[DO:${state.roomCode}] UNAUTHORIZED_PLAYER action=${msg.type} socketPlayer=${socketAtt.playerId} msgPlayer=${msg.playerId}`
+      );
+      return {
+        ok: false,
+        status: 403,
+        code: 'UNAUTHORIZED_PLAYER',
+        message: 'La identidad solicitada no coincide con la sesión autenticada.',
+      };
+    }
+
+    // 2. Validate playerToken if supplied (prevents using another player's token!)
+    if (msg.playerToken) {
+      const validToken = verifyPlayerToken(
+        msg.playerToken,
+        state.roomCode,
+        msg.playerId,
+        this.teacherPin,
+        this.env.TEACHER_TOKEN_SECRET
+      );
+      if (!validToken) {
+        console.warn(
+          `[DO:${state.roomCode}] INVALID_PLAYER_TOKEN action=${msg.type} playerId=${msg.playerId}`
+        );
+        return {
+          ok: false,
+          status: 401,
+          code: 'INVALID_PLAYER_TOKEN',
+          message: 'Credencial de participante inválida o de otro jugador.',
+        };
+      }
+    } else if (ws && !socketAtt?.playerId) {
+      return {
+        ok: false,
+        status: 401,
+        code: 'UNAUTHORIZED_PLAYER',
+        message: 'Debes registrarte en la sala antes de realizar acciones.',
+      };
+    }
+
+    // 3. Verify player actually belongs to this room
+    const player = state.players.find((pl) => pl.id === msg.playerId);
+    if (!player) {
+      return {
+        ok: false,
+        status: 404,
+        code: 'PLAYER_NOT_FOUND',
+        message: 'Jugador no reconocido en la sala.',
+      };
+    }
+
+    switch (msg.type) {
+      case 'TOGGLE_READY': {
+        player.ready = !player.ready;
+        state.updatedAt = Date.now();
+        await this.persist();
+        const event: ServerToClientMessage = { type: 'STATE_SYNC', state };
+        this.broadcast(event);
+        return { ok: true, event };
+      }
+
+      case 'SELECT_TEAM': {
+        if (state.status !== 'lobby') {
+          return {
+            ok: false,
+            status: 409,
+            code: 'GAME_ALREADY_STARTED',
+            message: 'Solo se puede cambiar de equipo en la sala de espera.',
+          };
+        }
+        const team = state.teams.find((t) => t.id === msg.teamId);
+        if (!team) {
+          return { ok: false, status: 400, code: 'INVALID_TEAM', message: 'Equipo inválido.' };
+        }
+        player.teamId = team.id;
+        refreshAllTeamRoles(state);
+        state.updatedAt = Date.now();
+        await this.persist();
+        const event: ServerToClientMessage = { type: 'STATE_SYNC', state };
+        this.broadcast(event);
+        return { ok: true, event };
+      }
+
+      case 'ROLL_DICE': {
+        const questions = await db.getQuestions();
+        const rollRes = rollDiceServerSide(state, msg.playerId, questions);
+        if (!rollRes.ok || !rollRes.roll) {
+          return {
+            ok: false,
+            status: 403,
+            code: 'INVALID_ROLL',
+            message: rollRes.error ?? 'Acción de dados no permitida.',
+          };
+        }
+        await this.persist();
+        const event: ServerToClientMessage = {
+          type: 'DICE_ROLLED',
+          roll: rollRes.roll,
+          state,
+        };
+        this.broadcast(event);
+        return { ok: true, event };
+      }
+
+      case 'SUBMIT_ANSWER': {
+        const ansRes = submitAnswerServerSide(
+          state,
+          msg.playerId,
+          msg.selectedIndices,
+          msg.collaborated ?? true
+        );
+        if (!ansRes.ok) {
+          return {
+            ok: false,
+            status: 400,
+            code: 'INVALID_ANSWER',
+            message: ansRes.error ?? 'No se pudo procesar la respuesta.',
+          };
+        }
+        if (state.status === 'finished') {
+          await db.saveMatchHistory(buildMatchHistoryFromState(state));
+        }
+        await this.persist();
+        const event: ServerToClientMessage = {
+          type: 'ANSWER_RESULT',
+          isCorrect: Boolean(ansRes.isCorrect),
+          pointsAwarded: ansRes.pointsAwarded ?? 0,
+          unlockedBadges: ansRes.unlockedBadges ?? [],
+          state,
+        };
+        this.broadcast(event);
+        return { ok: true, event };
+      }
+
+      case 'COMPLETE_CHALLENGE_3D': {
+        const chRes = completeChallenge3DServerSide(
+          state,
+          msg.playerId,
+          msg.selectedHotspotIds
+        );
+        if (!chRes.ok) {
+          return {
+            ok: false,
+            status: 400,
+            code: 'INVALID_CHALLENGE',
+            message: chRes.error ?? 'No se pudo completar el desafío 3D.',
+          };
+        }
+        await this.persist();
+        const event: ServerToClientMessage = {
+          type: 'ANSWER_RESULT',
+          isCorrect: Boolean(chRes.isCorrect),
+          pointsAwarded: chRes.pointsAwarded ?? 0,
+          unlockedBadges: chRes.unlockedBadges ?? [],
+          state,
+        };
+        this.broadcast(event);
+        return { ok: true, event };
+      }
+
+      case 'NEXT_TURN': {
+        const activeTeam = state.teams[state.activeTeamIndex];
+        if (!player.isTeacher && player.teamId !== activeTeam?.id) {
+          return {
+            ok: false,
+            status: 403,
+            code: 'UNAUTHORIZED_TURN',
+            message: 'Solo el equipo activo o el docente pueden avanzar al siguiente turno.',
+          };
+        }
+        advanceTurnServerSide(state);
+        await this.persist();
+        const event: ServerToClientMessage = { type: 'STATE_SYNC', state };
+        this.broadcast(event);
+        return { ok: true, event };
       }
     }
   }

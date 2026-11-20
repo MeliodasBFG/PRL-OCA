@@ -189,7 +189,18 @@ export interface Player {
   ready: boolean;
   isTeacher?: boolean;
   isSpectator?: boolean;
+  participatesAsPlayer?: boolean;
   joinedAt: number;
+}
+
+export interface RoomParticipantStats {
+  registeredCount: number;
+  connectedCount: number;
+  disconnectedCount: number;
+  teacherConnected: boolean;
+  teachersCount: number;
+  spectatorsConnected: number;
+  maxPlayers: number;
 }
 
 export interface RoleAssignment {
@@ -299,6 +310,8 @@ export type RoomJoinErrorCode =
   | 'INVALID_TEACHER_PIN'
   | 'TEACHER_AUTH_REQUIRED'
   | 'INVALID_PLAYER_TOKEN'
+  | 'UNAUTHORIZED_PLAYER'
+  | 'PLAYER_NOT_FOUND'
   | 'JOIN_REJECTED';
 
 export interface GameRoomState {
@@ -359,24 +372,29 @@ export type ClientToServerMessage =
       preferredTeamId?: string;
       isTeacher?: boolean;
       isSpectator?: boolean;
+      participatesAsPlayer?: boolean;
       teacherPin?: string;
+      teacherToken?: string;
       playerToken?: string;
     }
   | {
       type: 'TOGGLE_READY';
       actionId: string;
       playerId: string;
+      playerToken?: string;
     }
   | {
       type: 'SELECT_TEAM';
       actionId: string;
       playerId: string;
       teamId: string;
+      playerToken?: string;
     }
   | {
       type: 'ROLL_DICE';
       actionId: string;
       playerId: string;
+      playerToken?: string;
     }
   | {
       type: 'SUBMIT_ANSWER';
@@ -384,17 +402,20 @@ export type ClientToServerMessage =
       playerId: string;
       selectedIndices: number[];
       collaborated?: boolean;
+      playerToken?: string;
     }
   | {
       type: 'COMPLETE_CHALLENGE_3D';
       actionId: string;
       playerId: string;
       selectedHotspotIds: string[];
+      playerToken?: string;
     }
   | {
       type: 'NEXT_TURN';
       actionId: string;
       playerId: string;
+      playerToken?: string;
     }
   | {
       type: 'TEACHER_ACTION';

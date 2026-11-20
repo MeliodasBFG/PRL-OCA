@@ -21,6 +21,7 @@ import {
   QuestionItem,
   RoleAssignment,
   RoomJoinErrorCode,
+  RoomParticipantStats,
   Team,
   TeamRole,
 } from '../types/game';
@@ -99,9 +100,39 @@ export function buildTeamsForConfig(config: GameConfig): Team[] {
   return teams;
 }
 
+export function isPlayerCountedAsParticipant(player: Player): boolean {
+  if (player.isSpectator) return false;
+  if (player.isTeacher && !player.participatesAsPlayer) return false;
+  return true;
+}
+
+export function getRoomParticipantStats(state: GameRoomState): RoomParticipantStats {
+  const uniqueMap = new Map<string, Player>();
+  for (const p of state.players) {
+    uniqueMap.set(p.id, p);
+  }
+  const uniquePlayers = Array.from(uniqueMap.values());
+  const participants = uniquePlayers.filter(isPlayerCountedAsParticipant);
+  const connectedParticipants = participants.filter((p) => p.connected);
+  const teachers = uniquePlayers.filter((p) => Boolean(p.isTeacher));
+  const spectatorsConnected = uniquePlayers.filter(
+    (p) => Boolean(p.isSpectator) && p.connected
+  ).length;
+
+  return {
+    registeredCount: participants.length,
+    connectedCount: connectedParticipants.length,
+    disconnectedCount: Math.max(0, participants.length - connectedParticipants.length),
+    teacherConnected: teachers.some((t) => t.connected),
+    teachersCount: teachers.length,
+    spectatorsConnected,
+    maxPlayers: state.config.maxPlayers,
+  };
+}
+
 export function computeRolesForTeam(team: Team, allPlayers: Player[]): RoleAssignment[] {
   const members = allPlayers.filter(
-    (p) => p.teamId === team.id && !p.isTeacher && !p.isSpectator
+    (p) => p.teamId === team.id && isPlayerCountedAsParticipant(p)
   );
   if (members.length === 0) {
     return [];
@@ -134,7 +165,9 @@ export function refreshAllTeamRoles(state: GameRoomState): void {
   for (const team of state.teams) {
     team.currentRoles = computeRolesForTeam(team, state.players);
     if (state.config.mode === 'individual') {
-      const owner = state.players.find((p) => p.teamId === team.id && !p.isTeacher && !p.isSpectator);
+      const owner = state.players.find(
+        (p) => p.teamId === team.id && isPlayerCountedAsParticipant(p)
+      );
       if (owner) {
         team.name = owner.name;
       }
@@ -251,6 +284,7 @@ export function evaluateJoinEligibility(
     playerName: string;
     isTeacher?: boolean;
     isSpectator?: boolean;
+    participatesAsPlayer?: boolean;
   }
 ): {
   ok: boolean;
@@ -260,6 +294,7 @@ export function evaluateJoinEligibility(
 } {
   const wantTeacher = Boolean(params.isTeacher);
   const wantSpectator = Boolean(params.isSpectator);
+  const countsAsParticipant = (!wantTeacher && !wantSpectator) || Boolean(params.participatesAsPlayer);
 
   if (state.status === 'closed') {
     return {
@@ -304,8 +339,8 @@ export function evaluateJoinEligibility(
     };
   }
 
-  const activeParticipants = state.players.filter((p) => !p.isTeacher && !p.isSpectator);
-  if (!wantTeacher && !wantSpectator && activeParticipants.length >= state.config.maxPlayers) {
+  const activeParticipants = state.players.filter(isPlayerCountedAsParticipant);
+  if (countsAsParticipant && activeParticipants.length >= state.config.maxPlayers) {
     return {
       ok: false,
       errorCode: 'ROOM_FULL',
@@ -324,6 +359,7 @@ export function joinPlayerToState(
     preferredTeamId?: string;
     isTeacher?: boolean;
     isSpectator?: boolean;
+    participatesAsPlayer?: boolean;
   }
 ): {
   ok: boolean;
@@ -335,6 +371,7 @@ export function joinPlayerToState(
   const cleanName = params.playerName.trim().replace(/\s+/g, ' ');
   const wantTeacher = Boolean(params.isTeacher);
   const wantSpectator = Boolean(params.isSpectator);
+  const countsAsParticipant = (!wantTeacher && !wantSpectator) || Boolean(params.participatesAsPlayer);
 
   const eligibility = evaluateJoinEligibility(state, params);
   if (!eligibility.ok) {
@@ -353,9 +390,12 @@ export function joinPlayerToState(
     if (cleanName) {
       existing.name = cleanName;
     }
+    if (params.participatesAsPlayer !== undefined && wantTeacher) {
+      existing.participatesAsPlayer = Boolean(params.participatesAsPlayer);
+    }
 
     // Preserve previous team assignment (or assign valid team if somehow invalid)
-    if (!wantTeacher && !wantSpectator) {
+    if (countsAsParticipant || existing.participatesAsPlayer) {
       const hasValidTeam = state.teams.some((t) => t.id === existing.teamId);
       if (!hasValidTeam) {
         const preferred = state.teams.find((t) => t.id === params.preferredTeamId);
@@ -383,11 +423,11 @@ export function joinPlayerToState(
     return { ok: true, player: existing, reconnected: true };
   }
 
-  const activeParticipants = state.players.filter((p) => !p.isTeacher && !p.isSpectator);
+  const activeParticipants = state.players.filter(isPlayerCountedAsParticipant);
 
   // Pick balanced team if not specified or invalid
   let assignedTeamId = 'spectator';
-  if (!wantTeacher && !wantSpectator) {
+  if (countsAsParticipant) {
     const validPreferred = state.teams.find((t) => t.id === params.preferredTeamId);
     if (validPreferred) {
       assignedTeamId = validPreferred.id;
@@ -414,6 +454,7 @@ export function joinPlayerToState(
     ready: true,
     isTeacher: wantTeacher,
     isSpectator: wantSpectator,
+    participatesAsPlayer: Boolean(wantTeacher && params.participatesAsPlayer),
     joinedAt: Date.now(),
   };
 
@@ -706,7 +747,7 @@ export function submitAnswerServerSide(
   const activeTeam = state.teams[state.activeTeamIndex];
   const player = state.players.find((p) => p.id === playerId);
   if (!player) {
-    return { ok: false, error: 'Jugador no encontrado.' };
+    return { ok: false, error: 'Jugador no reconocido en la sala.' };
   }
   if (!player.isTeacher && player.teamId !== activeTeam.id) {
     return { ok: false, error: `Solo el ${activeTeam.name} puede responder en su turno.` };
@@ -861,7 +902,7 @@ export function completeChallenge3DServerSide(
   const activeTeam = state.teams[state.activeTeamIndex];
   const player = state.players.find((p) => p.id === playerId);
   if (!player) {
-    return { ok: false, error: 'Jugador no encontrado.' };
+    return { ok: false, error: 'Jugador no reconocido en la sala.' };
   }
   if (!player.isTeacher && player.teamId !== activeTeam.id) {
     return { ok: false, error: `Solo el ${activeTeam.name} puede resolver este desafío.` };

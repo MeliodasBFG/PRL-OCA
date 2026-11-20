@@ -27,6 +27,7 @@ import {
   TILE_TYPE_LABELS,
   TileDefinition,
   WrongAnswerPenalty,
+  getRoomParticipantStats,
 } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 import { BoardScene3D } from '../scenes/BoardScene3D';
@@ -191,6 +192,7 @@ export const GameScreen: React.FC = () => {
     if (b.position !== a.position) return b.position - a.position;
     return b.score - a.score;
   });
+  const participantStats = getRoomParticipantStats(roomState);
 
   const anyModalOpen = Boolean(
     (roomState.activeChallenge &&
@@ -570,6 +572,9 @@ export const GameScreen: React.FC = () => {
           <div className="sidebar-title-row">
             <Trophy size={17} className="text-yellow" />
             <h3>Clasificación en Vivo</h3>
+            <span className="turn-tile-pill" title="Participantes conectados / máximo">
+              <Users size={13} /> {participantStats.connectedCount}/{participantStats.maxPlayers}
+            </span>
             <button
               type="button"
               className="btn-ghost-sm show-mobile-only sidebar-mobile-close"
