@@ -58,6 +58,7 @@ async function createAndJoinRoom(params: {
   teacherPin: string;
   studentCount: number;
   maxPlayers?: number;
+  allowLateJoin?: boolean;
   secret?: string;
 }) {
   const sockets: MockSocket[] = [];
@@ -79,6 +80,7 @@ async function createAndJoinRoom(params: {
           mode: 'teams',
           teamCount: 3,
           maxPlayers: params.maxPlayers ?? 15,
+          allowLateJoin: params.allowLateJoin ?? false,
         },
       }),
     })
@@ -244,11 +246,12 @@ describe('Sincronización INICIAR PARTIDA entre Profesor, Alumnos y Cloudflare W
     }
   });
 
-  it('PRUEBA 4: Alumno que se une tarde cuando la partida ya está PLAYING entra directamente al tablero', async () => {
+  it('PRUEBA 4: Alumno que se une tarde cuando el profesor habilitó incorporaciones tardías entra directamente al tablero', async () => {
     const setup = await createAndJoinRoom({
       roomCode: 'LATE01',
       teacherPin: 'PIN2026',
       studentCount: 1,
+      allowLateJoin: true,
     });
 
     // Inicia primero con 1 alumno

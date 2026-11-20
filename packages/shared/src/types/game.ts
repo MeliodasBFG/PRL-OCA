@@ -225,6 +225,7 @@ export interface GameConfig {
   diceMode: '1d6' | '2d6';
   difficultyFilter: Difficulty | 'todas';
   wrongAnswerPenalty: WrongAnswerPenalty;
+  allowLateJoin?: boolean;
   enabledCategories: PRLCategory[];
   timers: {
     facil: number;
@@ -286,7 +287,19 @@ export interface GameLogEvent {
   message: string;
 }
 
-export type RoomStatus = 'lobby' | 'playing' | 'paused' | 'finished';
+export type RoomStatus = 'lobby' | 'playing' | 'paused' | 'finished' | 'closed';
+
+export type RoomJoinErrorCode =
+  | 'ROOM_NOT_FOUND'
+  | 'ROOM_CLOSED'
+  | 'ROOM_FINISHED'
+  | 'ROOM_FULL'
+  | 'INVALID_ROOM_CODE'
+  | 'ROOM_NOT_JOINABLE'
+  | 'INVALID_TEACHER_PIN'
+  | 'TEACHER_AUTH_REQUIRED'
+  | 'INVALID_PLAYER_TOKEN'
+  | 'JOIN_REJECTED';
 
 export interface GameRoomState {
   roomCode: string;
@@ -347,6 +360,7 @@ export type ClientToServerMessage =
       isTeacher?: boolean;
       isSpectator?: boolean;
       teacherPin?: string;
+      playerToken?: string;
     }
   | {
       type: 'TOGGLE_READY';
@@ -391,6 +405,7 @@ export type ClientToServerMessage =
         | { kind: 'PAUSE_GAME' }
         | { kind: 'RESUME_GAME' }
         | { kind: 'END_GAME' }
+        | { kind: 'CLOSE_ROOM' }
         | { kind: 'FORCE_NEXT_TURN' }
         | { kind: 'ASSIGN_TEAM'; playerId: string; teamId: string }
         | { kind: 'RENAME_PLAYER'; playerId: string; newName: string }
@@ -414,6 +429,7 @@ export type ServerToClientMessage =
       state: GameRoomState;
       yourPlayerId?: string;
       teacherToken?: string;
+      playerToken?: string;
     }
   | {
       type: 'GAME_STARTED';

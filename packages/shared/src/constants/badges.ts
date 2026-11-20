@@ -227,6 +227,7 @@ export const DEFAULT_GAME_CONFIG: GameConfig = {
   diceMode: '1d6',
   difficultyFilter: 'todas',
   wrongAnswerPenalty: 0,
+  allowLateJoin: false,
   enabledCategories: [...ALL_PRL_CATEGORIES],
   timers: {
     facil: 30,

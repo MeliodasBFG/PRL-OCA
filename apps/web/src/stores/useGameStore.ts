@@ -14,6 +14,7 @@ import {
   createInitialRoomState,
   disconnectPlayerFromState,
   executeTeacherCommandServerSide,
+  isValidRoomCodeFormat,
   joinPlayerToState,
   normalizeRoomCode,
   refreshAllTeamRoles,
@@ -23,7 +24,11 @@ import {
 import { ConnectionState, mpClient } from '../multiplayer/wsClient';
 import { soundEngine } from '../audio/SoundEngine';
 import { enterGameLandscapeMode, exitGameLandscapeMode } from '../utils/mobileOrientation';
-import { isLocalFallbackEnabled, resolveApiBaseUrl } from '../utils/networkConfig';
+import {
+  isLocalFallbackEnabled,
+  isProductionEnvironment,
+  resolveApiBaseUrl,
+} from '../utils/networkConfig';
 
 export type AppScreen =
   | 'home'
@@ -116,6 +121,68 @@ function persistSessionPlayerIdentity(playerId: string, playerName?: string): vo
   }
 }
 
+function persistSessionPlayerToken(roomCode: string, token?: string): void {
+  if (typeof window === 'undefined' || !token) return;
+  try {
+    window.sessionStorage.setItem(
+      `prl_oca_player_token_${normalizeRoomCode(roomCode)}`,
+      token
+    );
+  } catch {
+    // Ignore storage restriction
+  }
+}
+
+function loadSessionPlayerToken(roomCode: string): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    return (
+      window.sessionStorage.getItem(`prl_oca_player_token_${normalizeRoomCode(roomCode)}`) ??
+      undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+const FATAL_JOIN_ERRORS = new Set([
+  'ROOM_NOT_FOUND',
+  'ROOM_CLOSED',
+  'ROOM_FINISHED',
+  'ROOM_FULL',
+  'INVALID_ROOM_CODE',
+  'ROOM_NOT_JOINABLE',
+  'INVALID_TEACHER_PIN',
+  'INVALID_PLAYER_TOKEN',
+  'JOIN_REJECTED',
+]);
+
+function mapRoomErrorMessage(code?: string, serverMessage?: string): string {
+  switch (code) {
+    case 'ROOM_NOT_FOUND':
+      return serverMessage || 'No existe ninguna partida con ese código.';
+    case 'ROOM_CLOSED':
+      return serverMessage || 'Esta partida ha sido cerrada por el profesor.';
+    case 'ROOM_FINISHED':
+      return serverMessage || 'La partida ya ha finalizado y no admite incorporaciones.';
+    case 'ROOM_FULL':
+      return serverMessage || 'La sala está llena y ha alcanzado su capacidad máxima.';
+    case 'INVALID_ROOM_CODE':
+      return serverMessage || 'Formato de código de sala incorrecto.';
+    case 'ROOM_NOT_JOINABLE':
+      return (
+        serverMessage ||
+        'La partida ya está en curso y no admite nuevas incorporaciones en este momento.'
+      );
+    case 'INVALID_TEACHER_PIN':
+      return serverMessage || 'La clave/PIN del profesor no coincide.';
+    case 'INVALID_PLAYER_TOKEN':
+      return serverMessage || 'No se pudo validar tu sesión de participante en esta sala.';
+    default:
+      return serverMessage || 'No fue posible conectar con la sala solicitada.';
+  }
+}
+
 export interface GameStore {
   screen: AppScreen;
   createJoinTab: 'create' | 'join';
@@ -124,6 +191,7 @@ export interface GameStore {
   roomState: GameRoomState | null;
   playerId: string;
   playerName: string;
+  playerToken: string;
   isTeacher: boolean;
   isSpectator: boolean;
   projectorMode: boolean;
@@ -191,6 +259,7 @@ export interface GameStore {
   populate15DemoPlayers: () => void;
   markLocalDisconnect: () => void;
   leaveRoom: () => void;
+  closeRoom: () => Promise<void>;
   applyServerMessage: (msg: ServerToClientMessage) => void;
   syncRoomFromServer: () => Promise<void>;
 
@@ -417,12 +486,16 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       if (msg.yourPlayerId) {
         persistSessionPlayerIdentity(msg.yourPlayerId);
-        mpClient.updateJoinPlayerId(msg.yourPlayerId);
+        mpClient.updateJoinPlayerId(msg.yourPlayerId, msg.playerToken);
+      }
+      if (msg.playerToken && msg.state.roomCode) {
+        persistSessionPlayerToken(msg.state.roomCode, msg.playerToken);
       }
 
       set({
         roomState: { ...msg.state },
         playerId: msg.yourPlayerId ?? get().playerId,
+        playerToken: msg.playerToken ?? get().playerToken,
         teacherToken: msg.teacherToken ?? get().teacherToken,
         screen: nextScreen,
         errorMessage: null,
@@ -456,7 +529,22 @@ export const useGameStore = create<GameStore>((set, get) => {
         challengeModalReady: true,
       });
     } else if (msg.type === 'ERROR') {
-      set({ errorMessage: msg.message });
+      const formattedErr = mapRoomErrorMessage(msg.code, msg.message);
+      if (FATAL_JOIN_ERRORS.has(msg.code)) {
+        clearMovementTimers();
+        mpClient.disconnect();
+        set({
+          roomState: null,
+          isRemoteSession: false,
+          screen: 'create_join',
+          createJoinTab: 'join',
+          errorMessage: formattedErr,
+          isTokenMoving: false,
+          challengeModalReady: true,
+        });
+        return;
+      }
+      set({ errorMessage: formattedErr });
     }
   };
 
@@ -468,6 +556,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     roomState: null,
     playerId: getOrCreatePlayerId(),
     playerName: 'Participante PRL',
+    playerToken: '',
     isTeacher: false,
     isSpectator: false,
     projectorMode: false,
@@ -593,6 +682,22 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       try {
         const res = await fetch(`${apiBase}/api/rooms/${code}`, { cache: 'no-store' });
+        if (res.status === 404 || res.status === 410) {
+          const errPayload = (await res.json().catch(() => null)) as {
+            error?: string;
+            message?: string;
+          } | null;
+          handleServerMessage({
+            type: 'ERROR',
+            code: errPayload?.error ?? (res.status === 410 ? 'ROOM_CLOSED' : 'ROOM_NOT_FOUND'),
+            message:
+              errPayload?.message ??
+              (res.status === 410
+                ? 'Esta partida ha sido cerrada por el profesor.'
+                : 'No existe ninguna partida con ese código.'),
+          });
+          return;
+        }
         if (!res.ok) return;
         const data = (await res.json()) as { ok: boolean; state?: GameRoomState };
         if (!data.ok || !data.state) return;
@@ -664,19 +769,24 @@ export const useGameStore = create<GameStore>((set, get) => {
               createdOnServer = true;
             }
           } else {
-            const errJson = (await res.json().catch(() => null)) as { error?: string } | null;
-            serverError = errJson?.error ?? `Error del servidor (${res.status}).`;
+            const errJson = (await res.json().catch(() => null)) as {
+              error?: string;
+              message?: string;
+            } | null;
+            serverError =
+              errJson?.message ?? errJson?.error ?? `Error del servidor (${res.status}).`;
           }
         } catch {
           serverError = 'No se pudo conectar con el servidor Cloudflare Workers.';
         }
       }
 
-      if (!createdOnServer && !allowLocalFallback) {
+      const mustRequireServer = isProductionEnvironment() || !allowLocalFallback || Boolean(apiBase);
+      if (!createdOnServer && mustRequireServer) {
         set({
           errorMessage:
             serverError ??
-            'No se pudo conectar con el servidor Cloudflare Workers para crear la sala multijugador.',
+            'No se ha podido crear la sala en el servidor. Comprueba tu conexión e inténtalo de nuevo.',
         });
         return;
       }
@@ -737,73 +847,124 @@ export const useGameStore = create<GameStore>((set, get) => {
       soundEngine.playSfx('button_click');
 
       const cleanCode = normalizeRoomCode(roomCode);
-      if (!cleanCode || cleanCode.length < 3) {
-        set({ errorMessage: 'Introduce un código de sala válido.' });
+      if (!isValidRoomCodeFormat(cleanCode)) {
+        set({
+          errorMessage:
+            'Formato de código de sala incorrecto. Usa entre 3 y 24 caracteres alfanuméricos sin espacios.',
+        });
         return;
       }
 
       const apiBase = resolveApiBaseUrl();
       const allowLocalFallback = isLocalFallbackEnabled();
-      let state = allowLocalFallback ? mpClient.loadCachedRoomState(cleanCode) : null;
+      const inProduction = isProductionEnvironment();
+      const cleanAlias = playerName.trim() || 'Participante';
+      const currentPlayerId = get().playerId;
+      const existingToken = loadSessionPlayerToken(cleanCode);
+
+      let state: GameRoomState | null = null;
       let loadedFromServer = false;
+      let resolvedPlayerId = currentPlayerId;
+      let resolvedPlayerToken = existingToken ?? '';
+      let resolvedTeacherToken = get().teacherToken;
       let serverStatus = 0;
-      let serverError: string | null = null;
+      let serverErrorCode: string | undefined;
+      let serverErrorMessage: string | null = null;
+
+      if (inProduction && !apiBase) {
+        set({
+          errorMessage:
+            'No se ha podido verificar la sala. Comprueba tu conexión e inténtalo de nuevo.',
+        });
+        return;
+      }
 
       if (apiBase) {
         try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 10000);
-          const res = await fetch(`${apiBase}/api/rooms/${cleanCode}`, {
+          const res = await fetch(`${apiBase}/api/rooms/${cleanCode}/join`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roomCode: cleanCode,
+              playerId: currentPlayerId,
+              playerName: cleanAlias,
+              preferredTeamId,
+              isTeacher,
+              isSpectator,
+              teacherPin,
+              playerToken: existingToken,
+            }),
             signal: controller.signal,
             cache: 'no-store',
           });
           clearTimeout(timeout);
           serverStatus = res.status;
-          if (res.ok) {
-            const data = (await res.json()) as { ok: boolean; state: GameRoomState };
-            if (data.ok && data.state) {
-              state = data.state;
-              loadedFromServer = true;
+
+          const payload = (await res.json().catch(() => null)) as {
+            success?: boolean;
+            ok?: boolean;
+            error?: string;
+            message?: string;
+            playerId?: string;
+            playerToken?: string;
+            teacherToken?: string;
+            state?: GameRoomState;
+          } | null;
+
+          if (res.ok && payload?.ok && payload.state) {
+            state = payload.state;
+            loadedFromServer = true;
+            resolvedPlayerId = payload.playerId ?? currentPlayerId;
+            resolvedPlayerToken = payload.playerToken ?? resolvedPlayerToken;
+            if (payload.teacherToken) {
+              resolvedTeacherToken = payload.teacherToken;
             }
           } else {
-            const errJson = (await res.json().catch(() => null)) as { error?: string } | null;
-            serverError =
-              errJson?.error ??
-              (res.status === 404
-                ? `No existe la sala "${cleanCode}" en el servidor. Comprueba el código.`
-                : `Error del servidor (${res.status}).`);
+            serverErrorCode = payload?.error;
+            serverErrorMessage = payload?.message ?? payload?.error ?? null;
           }
         } catch {
-          // Handled below according to VITE_ENABLE_LOCAL_FALLBACK
+          serverErrorMessage =
+            'No se ha podido verificar la sala. Comprueba tu conexión e inténtalo de nuevo.';
         }
       }
 
-      if (serverStatus === 404 || serverStatus === 400) {
+      // Definitive rejection when the Worker rejected the room/join request (400, 403, 404, 409, 410)
+      if (serverStatus >= 400 && serverStatus < 500) {
         set({
-          errorMessage:
-            serverError ??
-            `La sala "${cleanCode}" no existe en el servidor. Verifica el código introducido.`,
+          errorMessage: mapRoomErrorMessage(serverErrorCode, serverErrorMessage ?? undefined),
         });
         return;
       }
 
-      if (!loadedFromServer && !allowLocalFallback) {
-        set({
-          errorMessage:
-            serverError ??
-            'No se pudo conectar con la sala en el servidor Cloudflare Workers. Verifica la URL del backend o el código de sala.',
-        });
-        return;
+      // In production or when server validation failed/unreachable, NEVER fall back to fake local rooms
+      if (!loadedFromServer) {
+        const localOnlyMode = !inProduction && allowLocalFallback && !apiBase;
+        const cachedLocalState = localOnlyMode ? mpClient.loadCachedRoomState(cleanCode) : null;
+        if (cachedLocalState) {
+          state = cachedLocalState;
+        } else {
+          set({
+            errorMessage:
+              serverStatus === 0 || serverStatus >= 500
+                ? 'No se ha podido verificar la sala. Comprueba tu conexión e inténtalo de nuevo.'
+                : mapRoomErrorMessage(serverErrorCode, serverErrorMessage ?? undefined),
+          });
+          return;
+        }
       }
 
       if (!state) {
-        state = createInitialRoomState(cleanCode);
+        set({
+          errorMessage: 'No existe ninguna partida con ese código.',
+        });
+        return;
       }
 
-      const playerId = get().playerId;
-      const cleanAlias = playerName.trim() || 'Participante';
       const joinRes = joinPlayerToState(state, {
-        playerId,
+        playerId: resolvedPlayerId,
         playerName: cleanAlias,
         preferredTeamId,
         isTeacher,
@@ -811,12 +972,15 @@ export const useGameStore = create<GameStore>((set, get) => {
       });
 
       if (!joinRes.ok) {
-        set({ errorMessage: joinRes.error ?? 'No fue posible entrar en la sala.' });
+        set({
+          errorMessage: mapRoomErrorMessage(joinRes.errorCode, joinRes.error),
+        });
         return;
       }
 
-      const resolvedPlayerId = joinRes.player?.id ?? playerId;
+      resolvedPlayerId = joinRes.player?.id ?? resolvedPlayerId;
       persistSessionPlayerIdentity(resolvedPlayerId, cleanAlias);
+      persistSessionPlayerToken(cleanCode, resolvedPlayerToken);
 
       const targetScreen = deriveScreenFromRoomState(state);
 
@@ -825,6 +989,8 @@ export const useGameStore = create<GameStore>((set, get) => {
         isRemoteSession: loadedFromServer,
         playerId: resolvedPlayerId,
         playerName: cleanAlias,
+        playerToken: resolvedPlayerToken,
+        teacherToken: resolvedTeacherToken,
         isTeacher: Boolean(isTeacher),
         isSpectator: Boolean(isSpectator),
         projectorMode: Boolean(isSpectator),
@@ -846,6 +1012,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           isTeacher,
           isSpectator,
           teacherPin,
+          playerToken: resolvedPlayerToken || undefined,
         },
         (msg) => handleServerMessage(msg),
         (status) => set({ connectionStatus: status }),
@@ -974,6 +1141,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       set({
         roomState: null,
         isRemoteSession: false,
+        playerToken: '',
         screen: 'home',
         projectorMode: false,
         showTeacherPanel: false,
@@ -981,6 +1149,14 @@ export const useGameStore = create<GameStore>((set, get) => {
         isTokenMoving: false,
         challengeModalReady: true,
       });
+    },
+
+    closeRoom: async () => {
+      const state = get().roomState;
+      if (state && get().isTeacher) {
+        await get().runTeacherCommand({ kind: 'CLOSE_ROOM' });
+      }
+      get().leaveRoom();
     },
 
     selectTeamInLobby: (teamId) => {

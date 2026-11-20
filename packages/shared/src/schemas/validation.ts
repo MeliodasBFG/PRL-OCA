@@ -63,6 +63,7 @@ export const GameConfigSchema = z.object({
   diceMode: z.enum(['1d6', '2d6']).default('1d6'),
   difficultyFilter: z.enum(['facil', 'intermedio', 'avanzado', 'todas']).default('todas'),
   wrongAnswerPenalty: z.union([z.literal(0), z.literal(1), z.literal(2)]).default(0),
+  allowLateJoin: z.boolean().default(false),
   enabledCategories: z.array(PRLCategorySchema).min(1),
   timers: z.object({
     facil: z.number().int().min(10).max(180).default(30),
@@ -86,11 +87,23 @@ export const CreateRoomRequestSchema = z.object({
   teacherName: z.string().min(2).max(40).default('Docente PRL'),
 });
 
+export const JoinRoomRequestSchema = z.object({
+  roomCode: z.string().min(1).max(32).optional(),
+  playerId: z.string().min(1).max(64).optional(),
+  playerName: z.string().min(1).max(40).default('Participante'),
+  preferredTeamId: z.string().optional(),
+  isTeacher: z.boolean().optional(),
+  isSpectator: z.boolean().optional(),
+  teacherPin: z.string().optional(),
+  playerToken: z.string().optional(),
+});
+
 export const TeacherCommandSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('START_GAME') }),
   z.object({ kind: z.literal('PAUSE_GAME') }),
   z.object({ kind: z.literal('RESUME_GAME') }),
   z.object({ kind: z.literal('END_GAME') }),
+  z.object({ kind: z.literal('CLOSE_ROOM') }),
   z.object({ kind: z.literal('FORCE_NEXT_TURN') }),
   z.object({
     kind: z.literal('ASSIGN_TEAM'),
@@ -142,6 +155,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     isTeacher: z.boolean().optional(),
     isSpectator: z.boolean().optional(),
     teacherPin: z.string().optional(),
+    playerToken: z.string().optional(),
   }),
   z.object({
     type: z.literal('TOGGLE_READY'),

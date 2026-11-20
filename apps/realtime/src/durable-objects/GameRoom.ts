@@ -3,6 +3,8 @@ import {
   ClientToServerMessage,
   GameConfig,
   GameRoomState,
+  JoinRoomRequestSchema,
+  RoomJoinErrorCode,
   ServerToClientMessage,
   TeacherCommandSchema,
   buildMatchHistoryFromState,
@@ -10,7 +12,9 @@ import {
   completeChallenge3DServerSide,
   createInitialRoomState,
   disconnectPlayerFromState,
+  evaluateJoinEligibility,
   executeTeacherCommandServerSide,
+  isValidRoomCodeFormat,
   joinPlayerToState,
   normalizeRoomCode,
   refreshAllTeamRoles,
@@ -20,8 +24,10 @@ import {
 import {
   RateLimiter,
   buildCorsHeaders,
+  createPlayerToken,
   createTeacherToken,
   isOriginAllowed,
+  verifyPlayerToken,
   verifyTeacherToken,
 } from '../security/auth';
 import { DatabaseService } from '../services/db';
@@ -34,6 +40,7 @@ export interface Env {
   ENVIRONMENT?: string;
   TEACHER_TOKEN_SECRET?: string;
   TEACHER_ADMIN_SECRET?: string;
+  TEACHER_CREATE_SECRET?: string;
 }
 
 interface SocketAttachment {
@@ -42,10 +49,15 @@ interface SocketAttachment {
   isSpectator?: boolean;
 }
 
+type VerifiedRoomLoadResult =
+  | { ok: true; state: GameRoomState; closed: boolean }
+  | { ok: false; status: number; error: RoomJoinErrorCode; message: string };
+
 /**
  * Durable Object `GameRoom`
  * Manages the authoritative state of a single PRL-OCA 3D match room (up to 15 players + teacher + spectators)
  * using Cloudflare Durable Objects WebSocket Hibernation API.
+ * Strictly requires explicit initialization (`room_initialized === true`) before accepting state reads, joins, or WebSockets.
  */
 export class GameRoom {
   private stateData: GameRoomState | null = null;
@@ -59,34 +71,39 @@ export class GameRoom {
     private readonly env: Env
   ) {}
 
-  private async ensureLoaded(roomCodeFallback = 'PRL001'): Promise<GameRoomState> {
-    if (this.stateData) return this.stateData;
-    const stored = await this.ctx.storage.get<GameRoomState>('room_state');
-    const storedPin = await this.ctx.storage.get<string>('teacher_pin');
+  private async loadVerifiedExistingRoom(
+    expectedRoomCode?: string
+  ): Promise<VerifiedRoomLoadResult> {
+    const initialized = await this.ctx.storage.get<boolean>('room_initialized');
+    const closedFlag = await this.ctx.storage.get<boolean>('room_closed');
     const storedCode = await this.ctx.storage.get<string>('room_code');
+    const storedPin = await this.ctx.storage.get<string>('teacher_pin');
+    const storedState = this.stateData ?? (await this.ctx.storage.get<GameRoomState>('room_state'));
+
+    if (initialized !== true || !storedState) {
+      return {
+        ok: false,
+        status: 404,
+        error: 'ROOM_NOT_FOUND',
+        message: 'No existe ninguna partida con ese código.',
+      };
+    }
+
+    const persistedCode = normalizeRoomCode(storedCode ?? storedState.roomCode);
+    if (expectedRoomCode && persistedCode !== normalizeRoomCode(expectedRoomCode)) {
+      return {
+        ok: false,
+        status: 404,
+        error: 'ROOM_NOT_FOUND',
+        message: 'No existe ninguna partida con ese código.',
+      };
+    }
+
+    this.stateData = storedState;
     if (storedPin) this.teacherPin = storedPin;
 
-    const fallbackCode = normalizeRoomCode(storedCode ?? roomCodeFallback) || 'PRL001';
-    if (stored) {
-      this.stateData = stored;
-    } else {
-      this.stateData = createInitialRoomState(fallbackCode);
-      await this.ctx.storage.put('room_code', fallbackCode);
-      await this.ctx.storage.put('room_state', this.stateData);
-    }
-    return this.stateData;
-  }
-
-  private async hasPersistedRoom(): Promise<boolean> {
-    if (this.stateData) return true;
-    const stored = await this.ctx.storage.get<GameRoomState>('room_state');
-    if (stored) {
-      this.stateData = stored;
-      const storedPin = await this.ctx.storage.get<string>('teacher_pin');
-      if (storedPin) this.teacherPin = storedPin;
-      return true;
-    }
-    return false;
+    const isClosed = closedFlag === true || storedState.status === 'closed';
+    return { ok: true, state: storedState, closed: isClosed };
   }
 
   private async persist(): Promise<void> {
@@ -94,6 +111,26 @@ export class GameRoom {
       await this.ctx.storage.put('room_code', this.stateData.roomCode);
       await this.ctx.storage.put('room_state', this.stateData);
     }
+  }
+
+  private jsonError(
+    status: number,
+    error: string,
+    message: string,
+    cors: Record<string, string>
+  ): Response {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        ok: false,
+        error,
+        message,
+      }),
+      {
+        status,
+        headers: { ...cors, 'Content-Type': 'application/json' },
+      }
+    );
   }
 
   public async fetch(request: Request): Promise<Response> {
@@ -109,19 +146,61 @@ export class GameRoom {
       return new Response(null, { status: 204, headers: cors });
     }
 
-    const roomCode = normalizeRoomCode(url.searchParams.get('roomCode') ?? 'PRL001') || 'PRL001';
+    const rawRoomCode = url.searchParams.get('roomCode') ?? '';
+    const roomCode = normalizeRoomCode(rawRoomCode);
 
-    // Initialize / Configure Room via POST /init
+    // Check whether code slot is already occupied (used during collision-free room creation)
+    if (request.method === 'GET' && url.pathname.endsWith('/exists')) {
+      const initialized = await this.ctx.storage.get<boolean>('room_initialized');
+      const closed = await this.ctx.storage.get<boolean>('room_closed');
+      const existingState = this.stateData ?? (await this.ctx.storage.get<GameRoomState>('room_state'));
+      const active =
+        initialized === true &&
+        closed !== true &&
+        Boolean(existingState) &&
+        existingState?.status !== 'closed' &&
+        existingState?.status !== 'finished';
+      return new Response(JSON.stringify({ ok: true, exists: active }), {
+        status: 200,
+        headers: { ...cors, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Initialize / Configure Room EXCLUSIVELY via POST /init (Teacher creation only)
     if (request.method === 'POST' && url.pathname.endsWith('/init')) {
       const body = (await request.json().catch(() => ({}))) as {
         roomCode?: string;
         config?: Partial<GameConfig>;
         teacherPin?: string;
       };
-      const code = normalizeRoomCode(body.roomCode ?? roomCode) || roomCode;
+      const code = normalizeRoomCode(body.roomCode ?? roomCode);
+      if (!isValidRoomCodeFormat(code)) {
+        return this.jsonError(400, 'INVALID_ROOM_CODE', 'Formato de código de sala incorrecto.', cors);
+      }
+
+      const alreadyInitialized = await this.ctx.storage.get<boolean>('room_initialized');
+      const alreadyClosed = await this.ctx.storage.get<boolean>('room_closed');
+      const existingState =
+        this.stateData ?? (await this.ctx.storage.get<GameRoomState>('room_state'));
+      if (
+        alreadyInitialized === true &&
+        alreadyClosed !== true &&
+        existingState &&
+        existingState.status !== 'closed' &&
+        existingState.status !== 'finished'
+      ) {
+        return this.jsonError(
+          409,
+          'ROOM_ALREADY_EXISTS',
+          'Ese código de sala ya se encuentra ocupado.',
+          cors
+        );
+      }
+
       this.teacherPin = body.teacherPin?.trim() || crypto.randomUUID().slice(0, 8);
       this.stateData = createInitialRoomState(code, body.config);
       await this.ctx.storage.put('room_initialized', true);
+      await this.ctx.storage.put('room_closed', false);
       await this.ctx.storage.put('room_code', code);
       await this.ctx.storage.put('teacher_pin', this.teacherPin);
       await this.persist();
@@ -133,6 +212,7 @@ export class GameRoom {
       console.log(`[DO:${code}] Room initialized (maxPlayers=${this.stateData.config.maxPlayers})`);
       return new Response(
         JSON.stringify({
+          success: true,
           ok: true,
           roomCode: code,
           teacherToken,
@@ -145,35 +225,138 @@ export class GameRoom {
       );
     }
 
-    // Read Room State via GET /state
+    if (!isValidRoomCodeFormat(roomCode)) {
+      return this.jsonError(
+        400,
+        'INVALID_ROOM_CODE',
+        'Formato de código de sala incorrecto.',
+        cors
+      );
+    }
+
+    // Read Room State via GET /state (NEVER creates or initializes a room)
     if (request.method === 'GET' && url.pathname.endsWith('/state')) {
-      const exists = await this.hasPersistedRoom();
-      if (!exists || !this.stateData) {
-        return new Response(
-          JSON.stringify({ ok: false, error: 'Sala no encontrada o aún no iniciada.' }),
-          {
-            status: 404,
-            headers: { ...cors, 'Content-Type': 'application/json' },
-          }
+      const loaded = await this.loadVerifiedExistingRoom(roomCode);
+      if (!loaded.ok) {
+        return this.jsonError(loaded.status, loaded.error, loaded.message, cors);
+      }
+      if (loaded.closed) {
+        return this.jsonError(
+          410,
+          'ROOM_CLOSED',
+          'Esta partida ha sido cerrada por el profesor.',
+          cors
         );
       }
-      return new Response(JSON.stringify({ ok: true, state: this.stateData }), {
+      return new Response(JSON.stringify({ success: true, ok: true, state: loaded.state }), {
         status: 200,
         headers: { ...cors, 'Content-Type': 'application/json' },
       });
     }
 
+    // Validate & authorize joining an existing room -> POST /join (NEVER initializes a room)
+    if (request.method === 'POST' && url.pathname.endsWith('/join')) {
+      const loaded = await this.loadVerifiedExistingRoom(roomCode);
+      if (!loaded.ok) {
+        return this.jsonError(loaded.status, loaded.error, loaded.message, cors);
+      }
+      if (loaded.closed) {
+        return this.jsonError(
+          410,
+          'ROOM_CLOSED',
+          'Esta partida ha sido cerrada por el profesor.',
+          cors
+        );
+      }
+
+      const rawBody = await request.json().catch(() => ({}));
+      const parsedJoin = JoinRoomRequestSchema.safeParse(rawBody);
+      if (!parsedJoin.success) {
+        return this.jsonError(
+          400,
+          'JOIN_REJECTED',
+          'Datos de acceso a la sala no válidos.',
+          cors
+        );
+      }
+
+      const reqData = parsedJoin.data;
+      const requestedPlayerId = reqData.playerId?.trim() || `plr_${crypto.randomUUID().slice(0, 8)}`;
+      const wantTeacher = Boolean(reqData.isTeacher);
+      const wantSpectator = Boolean(reqData.isSpectator);
+
+      let issuedTeacherToken: string | undefined;
+      if (wantTeacher) {
+        if (!reqData.teacherPin || reqData.teacherPin.trim() !== this.teacherPin) {
+          return this.jsonError(
+            403,
+            'INVALID_TEACHER_PIN',
+            'Clave o PIN de docente incorrecto.',
+            cors
+          );
+        }
+        issuedTeacherToken = createTeacherToken(
+          loaded.state.roomCode,
+          this.teacherPin,
+          this.env.TEACHER_TOKEN_SECRET
+        );
+      }
+
+      const eligibility = evaluateJoinEligibility(loaded.state, {
+        playerId: requestedPlayerId,
+        playerName: reqData.playerName,
+        isTeacher: wantTeacher,
+        isSpectator: wantSpectator,
+      });
+
+      if (!eligibility.ok) {
+        const statusMap: Partial<Record<RoomJoinErrorCode, number>> = {
+          ROOM_CLOSED: 410,
+          ROOM_FINISHED: 403,
+          ROOM_NOT_JOINABLE: 403,
+          ROOM_FULL: 409,
+        };
+        const status = (eligibility.errorCode && statusMap[eligibility.errorCode]) ?? 403;
+        return this.jsonError(
+          status,
+          eligibility.errorCode ?? 'JOIN_REJECTED',
+          eligibility.error ?? 'No es posible unirse a esta sala.',
+          cors
+        );
+      }
+
+      const resolvedPlayerId = eligibility.existingPlayer?.id ?? requestedPlayerId;
+      const playerToken = createPlayerToken(
+        loaded.state.roomCode,
+        resolvedPlayerId,
+        this.teacherPin,
+        this.env.TEACHER_TOKEN_SECRET
+      );
+
+      console.log(
+        `[DO:${loaded.state.roomCode}] HTTP /join verified playerId=${resolvedPlayerId} reconnected=${Boolean(eligibility.existingPlayer)} status=${loaded.state.status}`
+      );
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          ok: true,
+          roomCode: loaded.state.roomCode,
+          playerId: resolvedPlayerId,
+          playerToken,
+          teacherToken: issuedTeacherToken,
+          reconnected: Boolean(eligibility.existingPlayer),
+          state: loaded.state,
+        }),
+        { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } }
+      );
+    }
+
     // HTTP Authoritative fallback for Teacher Actions -> POST /teacher-action
     if (request.method === 'POST' && url.pathname.endsWith('/teacher-action')) {
-      const exists = await this.hasPersistedRoom();
-      if (!exists || !this.stateData) {
-        return new Response(
-          JSON.stringify({ ok: false, error: 'Sala no encontrada para ejecutar acción docente.' }),
-          {
-            status: 404,
-            headers: { ...cors, 'Content-Type': 'application/json' },
-          }
-        );
+      const loaded = await this.loadVerifiedExistingRoom(roomCode);
+      if (!loaded.ok) {
+        return this.jsonError(loaded.status, loaded.error, loaded.message, cors);
       }
       const rawBody = (await request.json().catch(() => ({}))) as {
         teacherToken?: string;
@@ -183,25 +366,20 @@ export class GameRoom {
       const token = rawBody.teacherToken?.trim() || headerToken;
       const parsedCmd = TeacherCommandSchema.safeParse(rawBody.command);
       if (!parsedCmd.success) {
-        return new Response(
-          JSON.stringify({ ok: false, code: 'INVALID_COMMAND', error: 'Comando docente inválido.' }),
-          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } }
-        );
+        return this.jsonError(400, 'INVALID_COMMAND', 'Comando docente inválido.', cors);
       }
       const cmdResult = await this.executeAuthoritativeTeacherCommand(
-        this.stateData,
+        loaded.state,
         token,
         parsedCmd.data,
         'http'
       );
       if (!cmdResult.ok) {
-        return new Response(
-          JSON.stringify({ ok: false, code: cmdResult.code, error: cmdResult.message }),
-          { status: cmdResult.status, headers: { ...cors, 'Content-Type': 'application/json' } }
-        );
+        return this.jsonError(cmdResult.status, cmdResult.code, cmdResult.message, cors);
       }
       return new Response(
         JSON.stringify({
+          success: true,
           ok: true,
           gameStarted: cmdResult.state.status === 'playing',
           startedAt: cmdResult.state.startedAt,
@@ -211,9 +389,7 @@ export class GameRoom {
       );
     }
 
-    const state = await this.ensureLoaded(roomCode);
-
-    // WebSocket Upgrade for Real-Time Multiplayer
+    // WebSocket Upgrade for Real-Time Multiplayer -> MUST verify room exists BEFORE accepting WebSocket
     if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
       if (
         !isOriginAllowed(
@@ -222,11 +398,34 @@ export class GameRoom {
           this.env.ENVIRONMENT ?? 'development'
         )
       ) {
-        return new Response(JSON.stringify({ ok: false, error: 'Origen WebSocket no autorizado.' }), {
-          status: 403,
-          headers: { ...cors, 'Content-Type': 'application/json' },
-        });
+        return this.jsonError(403, 'ORIGIN_FORBIDDEN', 'Origen WebSocket no autorizado.', cors);
       }
+
+      const loaded = await this.loadVerifiedExistingRoom(roomCode);
+      if (!loaded.ok) {
+        console.warn(`[DO:${roomCode}] Rejected WebSocket upgrade: ${loaded.error}`);
+        return this.jsonError(loaded.status, loaded.error, loaded.message, cors);
+      }
+      if (loaded.closed) {
+        console.warn(`[DO:${roomCode}] Rejected WebSocket upgrade: ROOM_CLOSED`);
+        return this.jsonError(
+          410,
+          'ROOM_CLOSED',
+          'Esta partida ha sido cerrada por el profesor.',
+          cors
+        );
+      }
+      if (loaded.state.status === 'finished') {
+        console.warn(`[DO:${roomCode}] Rejected WebSocket upgrade: ROOM_FINISHED`);
+        return this.jsonError(
+          403,
+          'ROOM_FINISHED',
+          'La partida ya ha finalizado y no admite nuevas conexiones.',
+          cors
+        );
+      }
+
+      const state = loaded.state;
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
 
@@ -267,14 +466,38 @@ export class GameRoom {
       });
     }
 
-    return new Response(JSON.stringify({ ok: false, error: 'Ruta no encontrada en GameRoom' }), {
-      status: 404,
-      headers: { ...cors, 'Content-Type': 'application/json' },
-    });
+    return this.jsonError(404, 'ROUTE_NOT_FOUND', 'Ruta no encontrada en GameRoom', cors);
   }
 
   public async webSocketMessage(ws: WebSocket, rawMessage: string | ArrayBuffer): Promise<void> {
-    const state = await this.ensureLoaded();
+    const loaded = await this.loadVerifiedExistingRoom();
+    if (!loaded.ok) {
+      this.sendToSocket(ws, {
+        type: 'ERROR',
+        code: loaded.error,
+        message: loaded.message,
+      });
+      try {
+        if (typeof ws.close === 'function') ws.close(1008, loaded.error);
+      } catch {
+        // Ignore
+      }
+      return;
+    }
+    if (loaded.closed) {
+      this.sendToSocket(ws, {
+        type: 'ERROR',
+        code: 'ROOM_CLOSED',
+        message: 'Esta partida ha sido cerrada por el profesor.',
+      });
+      try {
+        if (typeof ws.close === 'function') ws.close(1000, 'ROOM_CLOSED');
+      } catch {
+        // Ignore
+      }
+      return;
+    }
+    const state = loaded.state;
     const text =
       typeof rawMessage === 'string'
         ? rawMessage
@@ -342,7 +565,7 @@ export class GameRoom {
   }
 
   public async webSocketClose(ws: WebSocket): Promise<void> {
-    const state = await this.ensureLoaded();
+    const loaded = await this.loadVerifiedExistingRoom();
     const att = this.getSocketAttachment(ws);
     this.socketPlayers.delete(ws);
     if (typeof ws.serializeAttachment === 'function') {
@@ -352,6 +575,9 @@ export class GameRoom {
         // Socket already closed
       }
     }
+
+    if (!loaded.ok) return;
+    const state = loaded.state;
 
     if (att?.playerId) {
       // Only mark disconnected when no newer active socket owns this player ID
@@ -419,6 +645,24 @@ export class GameRoom {
           }
         }
 
+        if (msg.playerToken) {
+          const validP = verifyPlayerToken(
+            msg.playerToken,
+            state.roomCode,
+            msg.playerId,
+            this.teacherPin,
+            this.env.TEACHER_TOKEN_SECRET
+          );
+          if (!validP) {
+            this.sendToSocket(ws, {
+              type: 'ERROR',
+              code: 'INVALID_PLAYER_TOKEN',
+              message: 'Token de sesión de participante inválido o expirado.',
+            });
+            return;
+          }
+        }
+
         const joinRes = joinPlayerToState(state, {
           playerId: msg.playerId,
           playerName: msg.playerName,
@@ -430,13 +674,19 @@ export class GameRoom {
         if (!joinRes.ok) {
           this.sendToSocket(ws, {
             type: 'ERROR',
-            code: 'JOIN_REJECTED',
+            code: joinRes.errorCode ?? 'JOIN_REJECTED',
             message: joinRes.error ?? 'No se pudo unir a la sala.',
           });
           return;
         }
 
         const resolvedPlayerId = joinRes.player?.id ?? msg.playerId;
+        const playerToken = createPlayerToken(
+          state.roomCode,
+          resolvedPlayerId,
+          this.teacherPin,
+          this.env.TEACHER_TOKEN_SECRET
+        );
 
         // Transfer ownership cleanly away from any previous dead/stale sockets for this player
         for (const otherWs of this.getActiveSockets()) {
@@ -474,6 +724,7 @@ export class GameRoom {
           state,
           yourPlayerId: resolvedPlayerId,
           teacherToken: issuedToken,
+          playerToken,
         });
         this.broadcast({ type: 'STATE_SYNC', state }, ws);
         console.log(
@@ -675,9 +926,29 @@ export class GameRoom {
     const wasTransitionToPlaying =
       command.kind === 'START_GAME' && prevStatus !== 'playing' && state.status === 'playing';
 
+    if (command.kind === 'CLOSE_ROOM') {
+      await this.ctx.storage.put('room_closed', true);
+    }
+
     await this.persist();
 
-    if (command.kind === 'START_GAME') {
+    if (command.kind === 'CLOSE_ROOM') {
+      this.broadcast({
+        type: 'ERROR',
+        code: 'ROOM_CLOSED',
+        message: 'Esta partida ha sido cerrada por el profesor.',
+      });
+      this.broadcast({ type: 'STATE_SYNC', state });
+      for (const sock of this.getActiveSockets()) {
+        if (originWs && sock === originWs) continue;
+        try {
+          if (typeof sock.close === 'function') sock.close(1000, 'ROOM_CLOSED');
+        } catch {
+          // Ignore
+        }
+      }
+      console.log(`[DO:${state.roomCode}] ROOM_CLOSED source=${source}`);
+    } else if (command.kind === 'START_GAME') {
       const startedAt = state.startedAt ?? Date.now();
       if (wasTransitionToPlaying) {
         const deliveredStart = this.broadcast({

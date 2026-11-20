@@ -1,13 +1,16 @@
 import {
   CreateRoomRequestSchema,
   QuestionItemSchema,
+  isValidRoomCodeFormat,
   normalizeRoomCode,
 } from '@prl-oca/shared';
 import { Env, GameRoom } from './durable-objects/GameRoom';
-import { buildCorsHeaders, isOriginAllowed } from './security/auth';
+import { RateLimiter, buildCorsHeaders, isOriginAllowed } from './security/auth';
 import { DatabaseService } from './services/db';
 
 export { GameRoom };
+
+const createRoomLimiter = new RateLimiter(25, 60_000);
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -16,6 +19,47 @@ function generateRoomCode(): string {
     code += chars[Math.floor(Math.random() * chars.length)];
   }
   return code;
+}
+
+function workerJsonError(
+  status: number,
+  error: string,
+  message: string,
+  cors: Record<string, string>
+): Response {
+  return new Response(
+    JSON.stringify({
+      success: false,
+      ok: false,
+      error,
+      message,
+    }),
+    { status, headers: { ...cors, 'Content-Type': 'application/json' } }
+  );
+}
+
+function safeDecodeAndValidateRoomCode(
+  rawSegment: string
+): { ok: true; roomCode: string } | { ok: false; error: 'INVALID_ROOM_CODE'; message: string } {
+  let decoded = rawSegment;
+  try {
+    decoded = decodeURIComponent(rawSegment);
+  } catch {
+    return {
+      ok: false,
+      error: 'INVALID_ROOM_CODE',
+      message: 'Formato de código de sala incorrecto.',
+    };
+  }
+  const normalized = normalizeRoomCode(decoded);
+  if (!isValidRoomCodeFormat(normalized)) {
+    return {
+      ok: false,
+      error: 'INVALID_ROOM_CODE',
+      message: 'Formato de código de sala incorrecto.',
+    };
+  }
+  return { ok: true, roomCode: normalized };
 }
 
 export default {
@@ -57,54 +101,116 @@ export default {
       );
     }
 
-    // Create a new Game Room -> POST /api/rooms
+    // Create a new Game Room -> POST /api/rooms (EXCLUSIVE creation path)
     if (request.method === 'POST' && url.pathname === '/api/rooms') {
-      const rawBody = await request.json().catch(() => ({}));
-      const parsed = CreateRoomRequestSchema.safeParse(rawBody);
-      if (!parsed.success) {
-        return new Response(
-          JSON.stringify({ ok: false, error: 'Datos de configuración inválidos.' }),
-          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } }
+      const clientIp = request.headers.get('CF-Connecting-IP') ?? 'local';
+      if (!createRoomLimiter.allow(`create:${clientIp}`)) {
+        return workerJsonError(
+          429,
+          'RATE_LIMITED',
+          'Has creado demasiadas salas en poco tiempo. Espera un minuto.',
+          cors
         );
       }
 
-      const roomCode = generateRoomCode();
-      const id = env.GAME_ROOMS.idFromName(roomCode);
-      const stub = env.GAME_ROOMS.get(id);
-      console.log(`[Worker] Creating room roomCode=${roomCode}`);
+      if (env.TEACHER_CREATE_SECRET) {
+        const providedSecret =
+          request.headers.get('X-Teacher-Secret')?.trim() ||
+          request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '').trim();
+        if (providedSecret !== env.TEACHER_CREATE_SECRET) {
+          return workerJsonError(
+            401,
+            'TEACHER_AUTH_REQUIRED',
+            'Credencial requerida para crear nuevas salas.',
+            cors
+          );
+        }
+      }
 
-      const initRes = await stub.fetch(
-        new Request(`https://internal/init?roomCode=${roomCode}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roomCode,
-            config: parsed.data.config,
-            teacherPin: parsed.data.teacherPin,
-          }),
-        })
+      const rawBody = await request.json().catch(() => ({}));
+      const parsed = CreateRoomRequestSchema.safeParse(rawBody);
+      if (!parsed.success) {
+        return workerJsonError(
+          400,
+          'INVALID_CONFIG',
+          'Datos de configuración inválidos.',
+          cors
+        );
+      }
+
+      let lastStatus = 500;
+      let lastData = '';
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const roomCode = generateRoomCode();
+        const id = env.GAME_ROOMS.idFromName(roomCode);
+        const stub = env.GAME_ROOMS.get(id);
+
+        const initRes = await stub.fetch(
+          new Request(`https://internal/init?roomCode=${roomCode}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roomCode,
+              config: parsed.data.config,
+              teacherPin: parsed.data.teacherPin,
+            }),
+          })
+        );
+
+        lastStatus = initRes.status;
+        lastData = await initRes.text();
+        if (initRes.status !== 409) {
+          console.log(`[Worker] Created room roomCode=${roomCode}`);
+          return new Response(lastData, {
+            status: lastStatus,
+            headers: { ...cors, 'Content-Type': 'application/json' },
+          });
+        }
+      }
+
+      return workerJsonError(
+        503,
+        'ROOM_CODE_EXHAUSTED',
+        'No se pudo asignar un código de sala libre. Inténtalo de nuevo.',
+        cors
       );
+    }
 
-      const data = await initRes.text();
+    // Query existing Game Room state -> GET /api/rooms/:code (NEVER creates a room)
+    const roomMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)$/);
+    if (request.method === 'GET' && roomMatch) {
+      const check = safeDecodeAndValidateRoomCode(roomMatch[1]);
+      if (!check.ok) {
+        return workerJsonError(400, check.error, check.message, cors);
+      }
+      const id = env.GAME_ROOMS.idFromName(check.roomCode);
+      const stub = env.GAME_ROOMS.get(id);
+      const res = await stub.fetch(new Request(`https://internal/state?roomCode=${check.roomCode}`));
+      const data = await res.text();
       return new Response(data, {
-        status: initRes.status,
+        status: res.status,
         headers: { ...cors, 'Content-Type': 'application/json' },
       });
     }
 
-    // Query existing Game Room state -> GET /api/rooms/:code
-    const roomMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)$/);
-    if (request.method === 'GET' && roomMatch) {
-      const roomCode = normalizeRoomCode(decodeURIComponent(roomMatch[1]));
-      if (roomCode.length < 3 || roomCode.length > 24) {
-        return new Response(
-          JSON.stringify({ ok: false, error: 'Código de sala inválido.' }),
-          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } }
-        );
+    // Authoritative room join validation -> POST /api/rooms/:code/join (NEVER creates a room)
+    const joinMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/join$/);
+    if (request.method === 'POST' && joinMatch) {
+      const check = safeDecodeAndValidateRoomCode(joinMatch[1]);
+      if (!check.ok) {
+        return workerJsonError(400, check.error, check.message, cors);
       }
-      const id = env.GAME_ROOMS.idFromName(roomCode);
+      const id = env.GAME_ROOMS.idFromName(check.roomCode);
       const stub = env.GAME_ROOMS.get(id);
-      const res = await stub.fetch(new Request(`https://internal/state?roomCode=${roomCode}`));
+      const rawBody = await request.text();
+      console.log(`[Worker] Validating /join roomCode=${check.roomCode}`);
+      const res = await stub.fetch(
+        new Request(`https://internal/join?roomCode=${check.roomCode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: rawBody,
+        })
+      );
       const data = await res.text();
       return new Response(data, {
         status: res.status,
@@ -115,19 +221,16 @@ export default {
     // Authoritative HTTP fallback for Teacher Commands -> POST /api/rooms/:code/teacher-action
     const teacherActionMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(?:teacher-action|start)$/);
     if (request.method === 'POST' && teacherActionMatch) {
-      const roomCode = normalizeRoomCode(decodeURIComponent(teacherActionMatch[1]));
-      if (roomCode.length < 3 || roomCode.length > 24) {
-        return new Response(
-          JSON.stringify({ ok: false, error: 'Código de sala inválido.' }),
-          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } }
-        );
+      const check = safeDecodeAndValidateRoomCode(teacherActionMatch[1]);
+      if (!check.ok) {
+        return workerJsonError(400, check.error, check.message, cors);
       }
-      const id = env.GAME_ROOMS.idFromName(roomCode);
+      const id = env.GAME_ROOMS.idFromName(check.roomCode);
       const stub = env.GAME_ROOMS.get(id);
       const rawBody = await request.text();
-      console.log(`[Worker] Forwarding HTTP teacher-action roomCode=${roomCode}`);
+      console.log(`[Worker] Forwarding HTTP teacher-action roomCode=${check.roomCode}`);
       const res = await stub.fetch(
-        new Request(`https://internal/teacher-action?roomCode=${roomCode}`, {
+        new Request(`https://internal/teacher-action?roomCode=${check.roomCode}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -143,21 +246,21 @@ export default {
       });
     }
 
-    // WebSocket connection -> /ws/:code
+    // WebSocket connection -> /ws/:code (DO strictly verifies room existence BEFORE WebSocketPair upgrade)
     const wsMatch = url.pathname.match(/^\/ws\/([^/]+)$/);
     if (wsMatch) {
-      const roomCode = normalizeRoomCode(decodeURIComponent(wsMatch[1]));
-      if (roomCode.length < 3 || roomCode.length > 24) {
-        return new Response(
-          JSON.stringify({ ok: false, error: 'Código de sala inválido para WebSocket.' }),
-          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } }
-        );
+      const check = safeDecodeAndValidateRoomCode(wsMatch[1]);
+      if (!check.ok) {
+        return workerJsonError(400, check.error, check.message, cors);
       }
-      const id = env.GAME_ROOMS.idFromName(roomCode);
+      if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+        return workerJsonError(426, 'UPGRADE_REQUIRED', 'Se requiere conexión WebSocket.', cors);
+      }
+      const id = env.GAME_ROOMS.idFromName(check.roomCode);
       const stub = env.GAME_ROOMS.get(id);
-      console.log(`[Worker] Routing WebSocket upgrade roomCode=${roomCode}`);
+      console.log(`[Worker] Routing WebSocket upgrade roomCode=${check.roomCode}`);
       const forwardUrl = new URL(request.url);
-      forwardUrl.searchParams.set('roomCode', roomCode);
+      forwardUrl.searchParams.set('roomCode', check.roomCode);
       return stub.fetch(new Request(forwardUrl.toString(), request));
     }
 

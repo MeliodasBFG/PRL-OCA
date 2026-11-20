@@ -30,7 +30,7 @@ export const LobbyScreen: React.FC = () => {
     populate15DemoPlayers,
     runTeacherCommand,
     syncRoomFromServer,
-    leaveRoom,
+    closeRoom,
   } = useGameStore();
 
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -182,7 +182,7 @@ export const LobbyScreen: React.FC = () => {
                 <button
                   type="button"
                   className="btn-danger"
-                  onClick={leaveRoom}
+                  onClick={() => void closeRoom()}
                 >
                   Cerrar Sala
                 </button>

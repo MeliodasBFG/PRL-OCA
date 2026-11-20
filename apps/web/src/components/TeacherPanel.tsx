@@ -454,6 +454,24 @@ export const TeacherPanel: React.FC = () => {
                   }
                 />
               </label>
+
+              <label>
+                Incorporaciones tardías:
+                <select
+                  value={roomState.config.allowLateJoin ? 'allow' : 'reconnect_only'}
+                  onChange={(e) =>
+                    runTeacherCommand({
+                      kind: 'UPDATE_CONFIG',
+                      partialConfig: {
+                        allowLateJoin: e.target.value === 'allow',
+                      },
+                    })
+                  }
+                >
+                  <option value="reconnect_only">Solo reconexión de alumnos registrados</option>
+                  <option value="allow">Permitir nuevos alumnos con partida iniciada</option>
+                </select>
+              </label>
             </div>
           </section>
 

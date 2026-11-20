@@ -26,6 +26,7 @@ export const CreateJoinScreen: React.FC = () => {
   const [diceMode, setDiceMode] = useState<'1d6' | '2d6'>('1d6');
   const [difficultyFilter, setDifficultyFilter] = useState<Difficulty | 'todas'>('todas');
   const [wrongAnswerPenalty, setWrongAnswerPenalty] = useState<WrongAnswerPenalty>(0);
+  const [allowLateJoin, setAllowLateJoin] = useState<boolean>(false);
 
   // Join Room Form State
   const [joinCode, setJoinCode] = useState('PRL101');
@@ -61,6 +62,7 @@ export const CreateJoinScreen: React.FC = () => {
         diceMode,
         difficultyFilter,
         wrongAnswerPenalty,
+        allowLateJoin,
       },
     });
   };
@@ -208,6 +210,19 @@ export const CreateJoinScreen: React.FC = () => {
                   <option value={0}>No pasa nada (se mantiene en su casilla)</option>
                   <option value={1}>Retrocede 1 casilla</option>
                   <option value={2}>Retrocede 2 casillas</option>
+                </select>
+              </label>
+
+              <label>
+                Incorporaciones tras iniciar partida:
+                <select
+                  value={allowLateJoin ? 'allow' : 'reconnect_only'}
+                  onChange={(e) => setAllowLateJoin(e.target.value === 'allow')}
+                >
+                  <option value="reconnect_only">
+                    Solo reconexión de alumnos ya unidos (Recomendado)
+                  </option>
+                  <option value="allow">Permitir alumnos nuevos con la partida iniciada</option>
                 </select>
               </label>
 

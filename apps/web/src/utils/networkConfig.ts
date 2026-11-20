@@ -8,6 +8,8 @@ export interface NetworkEnvConfig {
   VITE_API_URL?: string;
   VITE_WS_URL?: string;
   VITE_ENABLE_LOCAL_FALLBACK?: string;
+  PROD?: boolean;
+  DEV?: boolean;
 }
 
 export interface BrowserLocationLike {
@@ -40,8 +42,27 @@ function isLocalHostname(hostname: string): boolean {
   );
 }
 
-export function isLocalFallbackEnabled(envOverride?: NetworkEnvConfig): boolean {
+export function isProductionEnvironment(
+  envOverride?: NetworkEnvConfig,
+  locationOverride?: BrowserLocationLike
+): boolean {
+  const loc = getBrowserLocation(locationOverride);
+  if (loc.hostname && !isLocalHostname(loc.hostname)) {
+    return true;
+  }
   const env = envOverride ?? getDefaultEnv();
+  return env.PROD === true && !isLocalHostname(loc.hostname);
+}
+
+export function isLocalFallbackEnabled(
+  envOverride?: NetworkEnvConfig,
+  locationOverride?: BrowserLocationLike
+): boolean {
+  const env = envOverride ?? getDefaultEnv();
+  // Never enable local simulation fallback in production origins (pages.dev / custom HTTPS domains)
+  if (isProductionEnvironment(env, locationOverride)) {
+    return false;
+  }
   return String(env.VITE_ENABLE_LOCAL_FALLBACK ?? 'true').trim().toLowerCase() !== 'false';
 }
 

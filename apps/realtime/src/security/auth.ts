@@ -42,6 +42,40 @@ export function verifyTeacherToken(
   return sig === expectedSig;
 }
 
+export function createPlayerToken(
+  roomCode: string,
+  playerId: string,
+  roomSecret: string,
+  serverSecret = ''
+): string {
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + TOKEN_TTL_MS;
+  const raw = `${roomCode.trim().toUpperCase()}:${playerId}:${issuedAt}:${expiresAt}`;
+  const sig = simpleHash(`player:${raw}:${roomSecret}:${serverSecret}`);
+  return `${raw}:${sig}`;
+}
+
+export function verifyPlayerToken(
+  token: string | undefined,
+  roomCode: string,
+  playerId: string,
+  roomSecret: string,
+  serverSecret = ''
+): boolean {
+  if (!token) return false;
+  const parts = token.split(':');
+  if (parts.length !== 5) return false;
+  const [tRoom, tPlayerId, issuedStr, expiresStr, sig] = parts;
+  if (tRoom !== roomCode.trim().toUpperCase()) return false;
+  if (tPlayerId !== playerId) return false;
+  const expiresAt = Number(expiresStr);
+  if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) return false;
+  const expectedSig = simpleHash(
+    `player:${tRoom}:${tPlayerId}:${issuedStr}:${expiresStr}:${roomSecret}:${serverSecret}`
+  );
+  return sig === expectedSig;
+}
+
 function simpleHash(input: string): string {
   let h1 = 0xdeadbeef ^ input.length;
   let h2 = 0x41c6ce57 ^ input.length;

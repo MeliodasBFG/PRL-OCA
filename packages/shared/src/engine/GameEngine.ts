@@ -20,12 +20,19 @@ import {
   PRLCategory,
   QuestionItem,
   RoleAssignment,
+  RoomJoinErrorCode,
   Team,
   TeamRole,
 } from '../types/game';
 
+export const ROOM_CODE_REGEX = /^[A-Z0-9][A-Z0-9_-]{2,23}$/;
+
 export function normalizeRoomCode(code: string): string {
-  return code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+  return code.trim().toUpperCase();
+}
+
+export function isValidRoomCodeFormat(code: string): boolean {
+  return ROOM_CODE_REGEX.test(normalizeRoomCode(code));
 }
 
 function createLog(
@@ -204,6 +211,111 @@ export function disconnectPlayerFromState(state: GameRoomState, playerId: string
   return true;
 }
 
+export function findExistingParticipant(
+  state: GameRoomState,
+  params: {
+    playerId: string;
+    playerName: string;
+    isTeacher?: boolean;
+    isSpectator?: boolean;
+  }
+): Player | undefined {
+  const cleanName = params.playerName.trim().replace(/\s+/g, ' ');
+  const wantTeacher = Boolean(params.isTeacher);
+  const wantSpectator = Boolean(params.isSpectator);
+  const normalizedTarget = normalizePlayerName(cleanName);
+
+  const existingById = state.players.find(
+    (p) =>
+      p.id === params.playerId &&
+      Boolean(p.isTeacher) === wantTeacher &&
+      Boolean(p.isSpectator) === wantSpectator
+  );
+  if (existingById) return existingById;
+
+  if (normalizedTarget.length > 0) {
+    return state.players.find(
+      (p) =>
+        Boolean(p.isTeacher) === wantTeacher &&
+        Boolean(p.isSpectator) === wantSpectator &&
+        normalizePlayerName(p.name) === normalizedTarget
+    );
+  }
+  return undefined;
+}
+
+export function evaluateJoinEligibility(
+  state: GameRoomState,
+  params: {
+    playerId: string;
+    playerName: string;
+    isTeacher?: boolean;
+    isSpectator?: boolean;
+  }
+): {
+  ok: boolean;
+  error?: string;
+  errorCode?: RoomJoinErrorCode;
+  existingPlayer?: Player;
+} {
+  const wantTeacher = Boolean(params.isTeacher);
+  const wantSpectator = Boolean(params.isSpectator);
+
+  if (state.status === 'closed') {
+    return {
+      ok: false,
+      errorCode: 'ROOM_CLOSED',
+      error: 'Esta sala ha sido cerrada por el profesor y no admite conexiones.',
+    };
+  }
+
+  const existing = findExistingParticipant(state, params);
+  if (state.status === 'finished' && !wantTeacher) {
+    return {
+      ok: false,
+      errorCode: 'ROOM_FINISHED',
+      error: 'La partida ya ha finalizado y no admite nuevas incorporaciones.',
+    };
+  }
+
+  if (existing) {
+    return { ok: true, existingPlayer: existing };
+  }
+
+  if (state.status === 'paused' && !wantTeacher && !wantSpectator) {
+    return {
+      ok: false,
+      errorCode: 'ROOM_NOT_JOINABLE',
+      error: 'La partida está pausada; solo pueden reconectarse participantes ya registrados.',
+    };
+  }
+
+  if (
+    state.status === 'playing' &&
+    !wantTeacher &&
+    !wantSpectator &&
+    !state.config.allowLateJoin
+  ) {
+    return {
+      ok: false,
+      errorCode: 'ROOM_NOT_JOINABLE',
+      error:
+        'La partida ya está en curso. Solo pueden reconectarse jugadores ya registrados en esta sala.',
+    };
+  }
+
+  const activeParticipants = state.players.filter((p) => !p.isTeacher && !p.isSpectator);
+  if (!wantTeacher && !wantSpectator && activeParticipants.length >= state.config.maxPlayers) {
+    return {
+      ok: false,
+      errorCode: 'ROOM_FULL',
+      error: `La sala ha alcanzado el límite máximo de ${state.config.maxPlayers} participantes.`,
+    };
+  }
+
+  return { ok: true };
+}
+
 export function joinPlayerToState(
   state: GameRoomState,
   params: {
@@ -213,31 +325,27 @@ export function joinPlayerToState(
     isTeacher?: boolean;
     isSpectator?: boolean;
   }
-): { ok: boolean; error?: string; player?: Player; reconnected?: boolean } {
+): {
+  ok: boolean;
+  error?: string;
+  errorCode?: RoomJoinErrorCode;
+  player?: Player;
+  reconnected?: boolean;
+} {
   const cleanName = params.playerName.trim().replace(/\s+/g, ' ');
   const wantTeacher = Boolean(params.isTeacher);
   const wantSpectator = Boolean(params.isSpectator);
-  const normalizedTarget = normalizePlayerName(cleanName);
 
-  // 1. Match returning participant first by ID (same role) or normalized name (same role)
-  // so reloading, switching tabs/devices, or leaving and re-entering never duplicates a player.
-  const existingById = state.players.find(
-    (p) =>
-      p.id === params.playerId &&
-      Boolean(p.isTeacher) === wantTeacher &&
-      Boolean(p.isSpectator) === wantSpectator
-  );
-  const existingByName =
-    !existingById && normalizedTarget.length > 0
-      ? state.players.find(
-          (p) =>
-            Boolean(p.isTeacher) === wantTeacher &&
-            Boolean(p.isSpectator) === wantSpectator &&
-            normalizePlayerName(p.name) === normalizedTarget
-        )
-      : undefined;
+  const eligibility = evaluateJoinEligibility(state, params);
+  if (!eligibility.ok) {
+    return {
+      ok: false,
+      errorCode: eligibility.errorCode,
+      error: eligibility.error,
+    };
+  }
 
-  const existing = existingById ?? existingByName;
+  const existing = eligibility.existingPlayer;
   if (existing) {
     const wasDisconnected = !existing.connected;
     const switchedClientSession = existing.id !== params.playerId;
@@ -276,12 +384,6 @@ export function joinPlayerToState(
   }
 
   const activeParticipants = state.players.filter((p) => !p.isTeacher && !p.isSpectator);
-  if (!wantTeacher && !wantSpectator && activeParticipants.length >= state.config.maxPlayers) {
-    return {
-      ok: false,
-      error: `La sala ha alcanzado el límite configurado de ${state.config.maxPlayers} participantes.`,
-    };
-  }
 
   // Pick balanced team if not specified or invalid
   let assignedTeamId = 'spectator';
@@ -1016,6 +1118,17 @@ export function executeTeacherCommandServerSide(
         createLog(
           'teacher',
           `Partida finalizada por el docente. Equipo líder: ${sorted[0]?.name ?? 'N/A'}.`
+        )
+      );
+      break;
+    }
+    case 'CLOSE_ROOM': {
+      state.status = 'closed';
+      state.phase = 'finished';
+      state.logs.unshift(
+        createLog(
+          'teacher',
+          'La sala ha sido cerrada por el docente. No se admiten más conexiones.'
         )
       );
       break;
