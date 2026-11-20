@@ -4,7 +4,7 @@ import {
   ServerToClientMessage,
   normalizeRoomCode,
 } from '@prl-oca/shared';
-import { resolveWebSocketUrl } from '../utils/networkConfig';
+import { resolveWebSocketCandidateUrls, resolveWebSocketUrl } from '../utils/networkConfig';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'local_sync';
 
@@ -23,6 +23,9 @@ export class MultiplayerClient {
   private joinPayload: Extract<ClientToServerMessage, { type: 'JOIN_ROOM' }> | null = null;
   private intentionalClose = false;
   private useLocalBroadcast = true;
+  private wsCandidates: string[] = [];
+  private candidateIndex = 0;
+  private currentAttemptOpened = false;
 
   public connect(
     roomCode: string,
@@ -38,6 +41,8 @@ export class MultiplayerClient {
     this.onMessageCallback = onMessage;
     this.onStatusCallback = onStatus;
     this.useLocalBroadcast = options?.useLocalBroadcast ?? true;
+    this.wsCandidates = resolveWebSocketCandidateUrls(this.roomCode);
+    this.candidateIndex = 0;
 
     // Cross-tab BroadcastChannel is only enabled for pure offline multi-tab demo mode
     if (this.useLocalBroadcast && typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -78,7 +83,12 @@ export class MultiplayerClient {
   }
 
   private openWebSocket(): void {
-    const wsUrl = resolveWebSocketUrl(this.roomCode);
+    if (this.wsCandidates.length === 0) {
+      this.wsCandidates = resolveWebSocketCandidateUrls(this.roomCode);
+      this.candidateIndex = 0;
+    }
+    const wsUrl =
+      this.wsCandidates[this.candidateIndex] ?? resolveWebSocketUrl(this.roomCode);
     if (!wsUrl) {
       this.onStatusCallback?.('local_sync');
       return;
@@ -86,6 +96,7 @@ export class MultiplayerClient {
 
     this.clearConnectTimeout();
     this.clearReconnectTimer();
+    this.currentAttemptOpened = false;
     this.onStatusCallback?.('connecting');
 
     try {
@@ -101,12 +112,17 @@ export class MultiplayerClient {
           } catch {
             // Ignore
           }
+          if (!this.currentAttemptOpened && this.wsCandidates.length > 1) {
+            this.candidateIndex = (this.candidateIndex + 1) % this.wsCandidates.length;
+            this.scheduleReconnect(250);
+          }
           this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
         }
       }, WS_CONNECT_TIMEOUT_MS);
 
       sock.onopen = () => {
         if (this.ws !== sock) return;
+        this.currentAttemptOpened = true;
         this.clearConnectTimeout();
         this.clearReconnectTimer();
         console.info(`[PRL-OCA][WS] Connected to room ${this.roomCode} (${wsUrl})`);
@@ -134,7 +150,7 @@ export class MultiplayerClient {
       sock.onerror = () => {
         if (this.ws !== sock) return;
         this.clearConnectTimeout();
-        console.warn(`[PRL-OCA][WS] Socket error on room ${this.roomCode}`);
+        console.warn(`[PRL-OCA][WS] Socket error on room ${this.roomCode} (${wsUrl})`);
         this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
       };
 
@@ -144,16 +160,30 @@ export class MultiplayerClient {
         this.stopPing();
         this.ws = null;
         if (!this.intentionalClose) {
-          console.warn(
-            `[PRL-OCA][WS] Closed on room ${this.roomCode} (code=${ev.code}); scheduling reconnect`
-          );
+          let delay = WS_RECONNECT_DELAY_MS;
+          if (!this.currentAttemptOpened && this.wsCandidates.length > 1) {
+            this.candidateIndex = (this.candidateIndex + 1) % this.wsCandidates.length;
+            const nextUrl = this.wsCandidates[this.candidateIndex];
+            console.warn(
+              `[PRL-OCA][WS] Primary endpoint closed before opening (code=${ev.code}); switching to ${nextUrl}`
+            );
+            delay = 250;
+          } else {
+            console.warn(
+              `[PRL-OCA][WS] Closed on room ${this.roomCode} (code=${ev.code}); scheduling reconnect`
+            );
+          }
           this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
-          this.scheduleReconnect();
+          this.scheduleReconnect(delay);
         }
       };
-    } catch {
+    } catch (err) {
+      console.warn(`[PRL-OCA][WS] Failed to construct WebSocket (${wsUrl})`, err);
+      if (this.wsCandidates.length > 1) {
+        this.candidateIndex = (this.candidateIndex + 1) % this.wsCandidates.length;
+      }
       this.onStatusCallback?.(this.useLocalBroadcast ? 'local_sync' : 'disconnected');
-      this.scheduleReconnect();
+      this.scheduleReconnect(250);
     }
   }
 

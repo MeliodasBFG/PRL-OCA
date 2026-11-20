@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   CameraViewMode,
+  ClientToServerMessage,
   GameConfig,
   GameRoomState,
   GraphicsQuality,
@@ -181,7 +182,25 @@ function mapRoomErrorMessage(code?: string, serverMessage?: string): string {
     case 'INVALID_TEACHER_PIN':
       return serverMessage || 'La clave/PIN del profesor no coincide.';
     case 'INVALID_PLAYER_TOKEN':
-      return serverMessage || 'No se pudo validar tu sesión de participante en esta sala.';
+      return (
+        serverMessage ||
+        'Credencial de participante inválida o caducada (INVALID_PLAYER_TOKEN).'
+      );
+    case 'UNAUTHORIZED_PLAYER':
+      return (
+        serverMessage ||
+        'Acción no autorizada para tu identidad de sesión (UNAUTHORIZED_PLAYER).'
+      );
+    case 'PLAYER_NOT_FOUND':
+      return serverMessage || 'Jugador no reconocido en la sala (PLAYER_NOT_FOUND).';
+    case 'NOT_YOUR_TURN':
+      return serverMessage || 'No es tu turno en este momento (NOT_YOUR_TURN).';
+    case 'DURABLE_OBJECT_ERROR':
+    case 'DURABLE_OBJECT_BINDING_MISSING':
+      return (
+        serverMessage ||
+        'Error en el servicio Durable Objects de Cloudflare Workers (DURABLE_OBJECT_ERROR).'
+      );
     default:
       return serverMessage || 'No fue posible conectar con la sala solicitada.';
   }
@@ -296,6 +315,137 @@ export interface GameStore {
 }
 
 export const useGameStore = create<GameStore>((set, get) => {
+  const inFlightSlotActions = new Set<string>();
+  const pendingSlotActionIds = new Map<string, string>();
+
+  const getOrCreateIdempotentActionId = (slotKey: string, prefix: string): string => {
+    const existing = pendingSlotActionIds.get(slotKey);
+    if (existing) return existing;
+    const created = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    pendingSlotActionIds.set(slotKey, created);
+    return created;
+  };
+
+  type GameplayClientMsg = Extract<
+    ClientToServerMessage,
+    {
+      type:
+        | 'TOGGLE_READY'
+        | 'SELECT_TEAM'
+        | 'ROLL_DICE'
+        | 'SUBMIT_ANSWER'
+        | 'COMPLETE_CHALLENGE_3D'
+        | 'NEXT_TURN';
+    }
+  >;
+
+  const sendRemoteGameplayAction = async (params: {
+    roomCode: string;
+    slotKey: string;
+    actionLabel: string;
+    msg: GameplayClientMsg;
+    onFailureReset?: () => void;
+  }): Promise<boolean> => {
+    const { roomCode, slotKey, actionLabel, msg, onFailureReset } = params;
+    if (inFlightSlotActions.has(slotKey)) {
+      console.warn('[PRL-OCA][Action] Ignorada doble pulsación con operación en curso', {
+        type: msg.type,
+        roomCode,
+        actionId: msg.actionId,
+      });
+      return true;
+    }
+
+    const apiBase = resolveApiBaseUrl();
+    const pToken = msg.playerToken || loadSessionPlayerToken(roomCode);
+    if (!apiBase || !pToken) {
+      mpClient.forceReconnectIfNeeded();
+      onFailureReset?.();
+      set({
+        errorMessage: !apiBase
+          ? 'Endpoint de Cloudflare Workers no configurado (VITE_API_URL).'
+          : 'Credenciales de participante (playerToken) no disponibles. Reconecta con la sala e inténtalo de nuevo.',
+      });
+      return false;
+    }
+
+    inFlightSlotActions.add(slotKey);
+    const targetUrl = `${apiBase}/api/rooms/${normalizeRoomCode(roomCode)}/action`;
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeoutTimer = setTimeout(() => controller.abort(), 10000);
+
+    try {
+      const res = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Player-Token': pToken,
+          'X-Player-Id': msg.playerId,
+        },
+        body: JSON.stringify({
+          playerId: msg.playerId,
+          playerToken: pToken,
+          message: { ...msg, playerToken: pToken },
+        }),
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      clearTimeout(timeoutTimer);
+
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        message?: string;
+        deduplicated?: boolean;
+        event?: ServerToClientMessage;
+      } | null;
+
+      if (res.ok && data?.ok && data.event) {
+        pendingSlotActionIds.delete(slotKey);
+        console.info('[PRL-OCA][HTTP][Action] OK', {
+          type: msg.type,
+          roomCode: normalizeRoomCode(roomCode),
+          playerId: msg.playerId,
+          actionId: msg.actionId,
+          status: res.status,
+          deduplicated: Boolean(data.deduplicated),
+          elapsedMs: Date.now() - startedAt,
+        });
+        handleServerMessage(data.event);
+        return true;
+      }
+
+      // Deterministic server rejection (4xx/5xx): clear pending slot on 4xx so next valid turn works cleanly
+      if (res.status >= 400 && res.status < 500) {
+        pendingSlotActionIds.delete(slotKey);
+      }
+      onFailureReset?.();
+      const diagnostic = formatServerHttpDiagnostic({
+        status: res.status,
+        errorCode: data?.error,
+        serverMessage: data?.message ?? data?.error ?? `No se pudo ${actionLabel}.`,
+        targetUrl,
+        origin: typeof window !== 'undefined' ? window.location.origin : undefined,
+      });
+      set({ errorMessage: diagnostic });
+      return false;
+    } catch (err) {
+      clearTimeout(timeoutTimer);
+      onFailureReset?.();
+      const diagnostic = await diagnoseFetchConnectionFailure({
+        error: err,
+        apiBase,
+        targetUrl,
+        actionLabel,
+      });
+      set({ errorMessage: diagnostic });
+      return false;
+    } finally {
+      inFlightSlotActions.delete(slotKey);
+    }
+  };
+
   const revealChallengeAfterArrival = () => {
     const st = get().roomState;
     const activeTeam = st?.teams[st.activeTeamIndex];
@@ -518,6 +668,22 @@ export const useGameStore = create<GameStore>((set, get) => {
         void enterGameLandscapeMode();
       }
     } else if (msg.type === 'DICE_ROLLED') {
+      const latestRoom = get().roomState;
+      const rollSlotKey = latestRoom
+        ? `${normalizeRoomCode(latestRoom.roomCode)}:${latestRoom.turnNumber}:waiting_roll:ROLL_DICE`
+        : '';
+      if (rollSlotKey) {
+        pendingSlotActionIds.delete(rollSlotKey);
+      }
+      // Prevent double animation if the same roll arrives over both WS broadcast and HTTP response
+      if (
+        latestRoom?.lastDiceRoll?.timestamp &&
+        latestRoom.lastDiceRoll.timestamp === msg.roll.timestamp &&
+        get().isTokenMoving
+      ) {
+        set({ roomState: msg.state, isRollingAnimation: false });
+        return;
+      }
       soundEngine.playSfx('dice_hit');
       set({
         roomState: msg.state,
@@ -544,7 +710,19 @@ export const useGameStore = create<GameStore>((set, get) => {
       });
     } else if (msg.type === 'ERROR') {
       const formattedErr = mapRoomErrorMessage(msg.code, msg.message);
-      if (FATAL_JOIN_ERRORS.has(msg.code)) {
+      const roomCodeNow = get().roomState?.roomCode;
+      if (roomCodeNow) {
+        const turnNow = get().roomState?.turnNumber ?? 1;
+        pendingSlotActionIds.delete(`${normalizeRoomCode(roomCodeNow)}:${turnNow}:waiting_roll:ROLL_DICE`);
+      }
+      console.error('[PRL-OCA][WS][ERROR]', { code: msg.code, message: msg.message });
+      const shouldLeaveToJoin =
+        FATAL_JOIN_ERRORS.has(msg.code ?? '') &&
+        (get().screen !== 'game' ||
+          msg.code === 'ROOM_NOT_FOUND' ||
+          msg.code === 'ROOM_CLOSED' ||
+          msg.code === 'ROOM_FINISHED');
+      if (shouldLeaveToJoin) {
         clearMovementTimers();
         mpClient.disconnect();
         set({
@@ -1244,46 +1422,25 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const playerId = get().playerId;
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const slotKey = `${normalizeRoomCode(state.roomCode)}:SELECT_TEAM:${teamId}`;
       const msg = {
         type: 'SELECT_TEAM' as const,
-        actionId: `sel_${Date.now()}`,
+        actionId: getOrCreateIdempotentActionId(slotKey, 'sel'),
         playerId,
         teamId,
         playerToken: pToken,
       };
       if (mpClient.isConnected() && get().connectionStatus === 'connected') {
-        mpClient.send(msg);
-        return;
+        if (mpClient.send(msg)) return;
       }
 
       if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        const apiBase = resolveApiBaseUrl();
-        if (apiBase && pToken) {
-          void fetch(`${apiBase}/api/rooms/${normalizeRoomCode(state.roomCode)}/action`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Player-Token': pToken,
-            },
-            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
-          })
-            .then((r) => r.json().catch(() => null))
-            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
-              if (data?.ok && data.event) {
-                handleServerMessage(data.event);
-              } else if (data?.message) {
-                set({ errorMessage: data.message });
-              }
-            })
-            .catch(() => {
-              mpClient.forceReconnectIfNeeded();
-              set({ errorMessage: 'Reconectando con la sala en Cloudflare para cambiar de equipo...' });
-            });
-          return;
-        }
         mpClient.forceReconnectIfNeeded();
-        set({
-          errorMessage: 'Reconectando con la sala en Cloudflare para cambiar de equipo...',
+        void sendRemoteGameplayAction({
+          roomCode: state.roomCode,
+          slotKey,
+          actionLabel: 'cambiar de equipo',
+          msg,
         });
         return;
       }
@@ -1304,45 +1461,24 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const playerId = get().playerId;
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const slotKey = `${normalizeRoomCode(state.roomCode)}:TOGGLE_READY:${state.updatedAt}`;
       const msg = {
         type: 'TOGGLE_READY' as const,
-        actionId: `rdy_${Date.now()}`,
+        actionId: getOrCreateIdempotentActionId(slotKey, 'rdy'),
         playerId,
         playerToken: pToken,
       };
       if (mpClient.isConnected() && get().connectionStatus === 'connected') {
-        mpClient.send(msg);
-        return;
+        if (mpClient.send(msg)) return;
       }
 
       if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        const apiBase = resolveApiBaseUrl();
-        if (apiBase && pToken) {
-          void fetch(`${apiBase}/api/rooms/${normalizeRoomCode(state.roomCode)}/action`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Player-Token': pToken,
-            },
-            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
-          })
-            .then((r) => r.json().catch(() => null))
-            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
-              if (data?.ok && data.event) {
-                handleServerMessage(data.event);
-              } else if (data?.message) {
-                set({ errorMessage: data.message });
-              }
-            })
-            .catch(() => {
-              mpClient.forceReconnectIfNeeded();
-              set({ errorMessage: 'Reconectando con la sala en Cloudflare para actualizar tu estado...' });
-            });
-          return;
-        }
         mpClient.forceReconnectIfNeeded();
-        set({
-          errorMessage: 'Reconectando con la sala en Cloudflare para actualizar tu estado...',
+        void sendRemoteGameplayAction({
+          roomCode: state.roomCode,
+          slotKey,
+          actionLabel: 'actualizar estado de preparación',
+          msg,
         });
         return;
       }
@@ -1358,6 +1494,11 @@ export const useGameStore = create<GameStore>((set, get) => {
     rollDice: () => {
       const state = get().roomState;
       if (!state || get().isRollingAnimation || get().isTokenMoving) return;
+
+      const rollSlotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:waiting_roll:ROLL_DICE`;
+      if (inFlightSlotActions.has(rollSlotKey)) {
+        return;
+      }
 
       clearMovementTimers();
       soundEngine.playSfx('dice_throw');
@@ -1381,9 +1522,10 @@ export const useGameStore = create<GameStore>((set, get) => {
           return;
         }
 
+        const slotKey = `${normalizeRoomCode(curRoom.roomCode)}:${curRoom.turnNumber}:waiting_roll:ROLL_DICE`;
         const msg = {
           type: 'ROLL_DICE' as const,
-          actionId: `roll_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          actionId: getOrCreateIdempotentActionId(slotKey, 'roll'),
           playerId,
           playerToken: pToken,
         };
@@ -1396,60 +1538,19 @@ export const useGameStore = create<GameStore>((set, get) => {
 
         // Authoritative HTTP fallback when playing remotely (NEVER silently run local fallback)
         if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-          const apiBase = resolveApiBaseUrl();
-          const roomCode = normalizeRoomCode(curRoom.roomCode);
-          if (!apiBase || !pToken) {
-            mpClient.forceReconnectIfNeeded();
-            set({
-              isRollingAnimation: false,
-              isTokenMoving: false,
-              challengeModalReady: true,
-              errorMessage:
-                'Reconectando credenciales con el servidor Cloudflare Workers. Inténtalo de nuevo en un instante.',
-            });
-            return;
-          }
-          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Player-Token': pToken,
-            },
-            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
-          })
-            .then(async (res) => {
-              const data = (await res.json().catch(() => null)) as {
-                ok?: boolean;
-                error?: string;
-                message?: string;
-                event?: ServerToClientMessage;
-              } | null;
-              if (res.ok && data?.ok && data.event) {
-                handleServerMessage(data.event);
-              } else {
-                set({
-                  isRollingAnimation: false,
-                  isTokenMoving: false,
-                  challengeModalReady: true,
-                  errorMessage: formatServerHttpDiagnostic({
-                    status: res.status,
-                    errorCode: data?.error,
-                    serverMessage: data?.message ?? data?.error ?? 'No se pudo lanzar el dado.',
-                    targetUrl: `${apiBase}/api/rooms/${roomCode}/action`,
-                    origin: typeof window !== 'undefined' ? window.location.origin : undefined,
-                  }),
-                });
-              }
-            })
-            .catch(() => {
+          mpClient.forceReconnectIfNeeded();
+          void sendRemoteGameplayAction({
+            roomCode: curRoom.roomCode,
+            slotKey,
+            actionLabel: 'enviar el lanzamiento de dados',
+            msg,
+            onFailureReset: () =>
               set({
                 isRollingAnimation: false,
                 isTokenMoving: false,
                 challengeModalReady: true,
-                errorMessage:
-                  'Error de red al enviar el lanzamiento de dados al servidor Cloudflare Workers.',
-              });
-            });
+              }),
+          });
           return;
         }
 
@@ -1486,9 +1587,10 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const playerId = get().playerId;
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:SUBMIT_ANSWER`;
       const msg = {
         type: 'SUBMIT_ANSWER' as const,
-        actionId: `ans_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        actionId: getOrCreateIdempotentActionId(slotKey, 'ans'),
         playerId,
         selectedIndices,
         collaborated,
@@ -1499,32 +1601,13 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        const apiBase = resolveApiBaseUrl();
-        const roomCode = normalizeRoomCode(state.roomCode);
-        if (apiBase && pToken) {
-          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Player-Token': pToken,
-            },
-            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
-          })
-            .then((r) => r.json().catch(() => null))
-            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
-              if (data?.ok && data.event) {
-                handleServerMessage(data.event);
-              } else if (data?.message) {
-                set({ errorMessage: data.message });
-              }
-            })
-            .catch(() => {
-              set({ errorMessage: 'No se pudo enviar la respuesta al servidor Cloudflare Workers.' });
-            });
-        } else {
-          mpClient.forceReconnectIfNeeded();
-          set({ errorMessage: 'Reconectando con la sala para enviar tu respuesta...' });
-        }
+        mpClient.forceReconnectIfNeeded();
+        void sendRemoteGameplayAction({
+          roomCode: state.roomCode,
+          slotKey,
+          actionLabel: 'enviar la respuesta',
+          msg,
+        });
         return;
       }
 
@@ -1570,9 +1653,10 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const playerId = get().playerId;
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:COMPLETE_CHALLENGE_3D`;
       const msg = {
         type: 'COMPLETE_CHALLENGE_3D' as const,
-        actionId: `ch3d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        actionId: getOrCreateIdempotentActionId(slotKey, 'ch3d'),
         playerId,
         selectedHotspotIds,
         playerToken: pToken,
@@ -1582,32 +1666,13 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        const apiBase = resolveApiBaseUrl();
-        const roomCode = normalizeRoomCode(state.roomCode);
-        if (apiBase && pToken) {
-          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Player-Token': pToken,
-            },
-            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
-          })
-            .then((r) => r.json().catch(() => null))
-            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
-              if (data?.ok && data.event) {
-                handleServerMessage(data.event);
-              } else if (data?.message) {
-                set({ errorMessage: data.message });
-              }
-            })
-            .catch(() => {
-              set({ errorMessage: 'No se pudo validar el desafío 3D en Cloudflare Workers.' });
-            });
-        } else {
-          mpClient.forceReconnectIfNeeded();
-          set({ errorMessage: 'Reconectando con la sala para completar el desafío...' });
-        }
+        mpClient.forceReconnectIfNeeded();
+        void sendRemoteGameplayAction({
+          roomCode: state.roomCode,
+          slotKey,
+          actionLabel: 'validar el desafío 3D',
+          msg,
+        });
         return;
       }
 
@@ -1640,9 +1705,10 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const playerId = get().playerId;
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
+      const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:${state.phase}:NEXT_TURN`;
       const msg = {
         type: 'NEXT_TURN' as const,
-        actionId: `nxt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        actionId: getOrCreateIdempotentActionId(slotKey, 'nxt'),
         playerId,
         playerToken: pToken,
       };
@@ -1651,32 +1717,13 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        const apiBase = resolveApiBaseUrl();
-        const roomCode = normalizeRoomCode(state.roomCode);
-        if (apiBase && pToken) {
-          void fetch(`${apiBase}/api/rooms/${roomCode}/action`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Player-Token': pToken,
-            },
-            body: JSON.stringify({ playerId, playerToken: pToken, message: msg }),
-          })
-            .then((r) => r.json().catch(() => null))
-            .then((data: { ok?: boolean; event?: ServerToClientMessage; message?: string } | null) => {
-              if (data?.ok && data.event) {
-                handleServerMessage(data.event);
-              } else if (data?.message) {
-                set({ errorMessage: data.message });
-              }
-            })
-            .catch(() => {
-              set({ errorMessage: 'No se pudo avanzar el turno en el servidor Cloudflare Workers.' });
-            });
-        } else {
-          mpClient.forceReconnectIfNeeded();
-          set({ errorMessage: 'Reconectando con la sala para avanzar de turno...' });
-        }
+        mpClient.forceReconnectIfNeeded();
+        void sendRemoteGameplayAction({
+          roomCode: state.roomCode,
+          slotKey,
+          actionLabel: 'avanzar al siguiente turno',
+          msg,
+        });
         return;
       }
 

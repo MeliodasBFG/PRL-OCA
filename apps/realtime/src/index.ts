@@ -74,8 +74,9 @@ export default {
     try {
       if (request.method === 'OPTIONS') {
         const preflightAllowed = isOriginAllowed(requestOrigin, configuredAllowedOrigin, environment);
+        const reqHeaders = request.headers.get('Access-Control-Request-Headers') ?? 'none';
         console.log(
-          `[Worker] CORS preflight path=${pathname} origin=${requestOrigin ?? 'none'} allowed=${preflightAllowed}`
+          `[Worker] CORS preflight path=${pathname} origin=${requestOrigin ?? 'none'} reqHeaders=${reqHeaders} allowed=${preflightAllowed}`
         );
         return new Response(null, { status: 204, headers: cors });
       }
@@ -302,6 +303,8 @@ export default {
             headers: {
               'Content-Type': 'application/json',
               'X-Player-Token': request.headers.get('X-Player-Token') ?? '',
+              'X-Player-Id': request.headers.get('X-Player-Id') ?? '',
+              Authorization: request.headers.get('Authorization') ?? '',
             },
             body: rawBody,
           })

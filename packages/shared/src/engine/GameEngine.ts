@@ -550,25 +550,46 @@ export function rollDiceServerSide(
   playerId: string,
   customBank?: QuestionItem[],
   customDieGenerator: () => number = secureRandomDie
-): { ok: boolean; error?: string; roll?: DiceRollResult } {
+): {
+  ok: boolean;
+  errorCode?: 'ROOM_NOT_PLAYING' | 'INVALID_PHASE' | 'INVALID_TEAM' | 'PLAYER_NOT_FOUND' | 'NOT_YOUR_TURN';
+  error?: string;
+  roll?: DiceRollResult;
+} {
   if (state.status !== 'playing') {
-    return { ok: false, error: 'La partida no está en curso.' };
+    return { ok: false, errorCode: 'ROOM_NOT_PLAYING', error: 'La partida no está en curso.' };
   }
   if (state.phase !== 'waiting_roll') {
-    return { ok: false, error: 'No es el momento de lanzar los dados.' };
+    return {
+      ok: false,
+      errorCode: 'INVALID_PHASE',
+      error: 'No es el momento de lanzar los dados.',
+    };
   }
 
   const activeTeam = state.teams[state.activeTeamIndex];
   if (!activeTeam) {
-    return { ok: false, error: 'No hay equipo activo seleccionado.' };
+    return {
+      ok: false,
+      errorCode: 'INVALID_TEAM',
+      error: 'No hay equipo activo seleccionado.',
+    };
   }
 
   const player = state.players.find((p) => p.id === playerId);
   if (!player) {
-    return { ok: false, error: 'Jugador no reconocido en la sala.' };
+    return {
+      ok: false,
+      errorCode: 'PLAYER_NOT_FOUND',
+      error: 'Jugador no reconocido en la sala.',
+    };
   }
   if (!player.isTeacher && player.teamId !== activeTeam.id) {
-    return { ok: false, error: `Es el turno del ${activeTeam.name}.` };
+    return {
+      ok: false,
+      errorCode: 'NOT_YOUR_TURN',
+      error: `Es el turno del ${activeTeam.name}.`,
+    };
   }
 
   const diceCount = state.config.diceMode === '2d6' ? 2 : 1;

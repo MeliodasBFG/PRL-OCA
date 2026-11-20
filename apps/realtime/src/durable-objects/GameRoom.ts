@@ -63,6 +63,8 @@ export class GameRoom {
   private stateData: GameRoomState | null = null;
   private teacherPin: string = crypto.randomUUID();
   private processedActionIds = new Set<string>();
+  private processedActionResults = new Map<string, ServerToClientMessage>();
+  private processedActionsLoaded = false;
   private rateLimiter = new RateLimiter(45, 5000);
   private socketPlayers = new Map<WebSocket, SocketAttachment>();
 
@@ -111,6 +113,36 @@ export class GameRoom {
       await this.ctx.storage.put('room_code', this.stateData.roomCode);
       await this.ctx.storage.put('room_state', this.stateData);
     }
+  }
+
+  private async ensureProcessedActionsLoaded(): Promise<void> {
+    if (this.processedActionsLoaded) return;
+    this.processedActionsLoaded = true;
+    const saved = await this.ctx.storage.get<Record<string, ServerToClientMessage>>(
+      'processed_actions'
+    );
+    if (saved && typeof saved === 'object') {
+      for (const [id, ev] of Object.entries(saved)) {
+        this.processedActionIds.add(id);
+        this.processedActionResults.set(id, ev);
+      }
+    }
+  }
+
+  private async recordProcessedAction(
+    actionId: string,
+    event: ServerToClientMessage
+  ): Promise<void> {
+    this.processedActionIds.add(actionId);
+    this.processedActionResults.set(actionId, event);
+    if (this.processedActionResults.size > 100) {
+      const oldestKey = this.processedActionResults.keys().next().value;
+      if (oldestKey) this.processedActionResults.delete(oldestKey);
+    }
+
+    // Persist the most recent 6 action results cleanly within Durable Object storage limits
+    const entries = Array.from(this.processedActionResults.entries()).slice(-6);
+    await this.ctx.storage.put('processed_actions', Object.fromEntries(entries));
   }
 
   private jsonError(
@@ -466,7 +498,12 @@ export class GameRoom {
         playerToken?: string;
         message?: unknown;
       } | null;
-      const headerToken = request.headers.get('X-Player-Token')?.trim();
+      const bearerToken = request.headers
+        .get('Authorization')
+        ?.replace(/^Bearer\s+/i, '')
+        .trim();
+      const headerToken = request.headers.get('X-Player-Token')?.trim() || bearerToken;
+      const headerPlayerId = request.headers.get('X-Player-Id')?.trim();
       const parsedAction = ClientMessageSchema.safeParse(rawBody?.message ?? rawBody);
       if (!parsedAction.success) {
         return this.jsonError(400, 'VALIDATION_ERROR', 'Acción de juego inválida.', cors);
@@ -478,6 +515,15 @@ export class GameRoom {
         actionMsg.type === 'TEACHER_ACTION'
       ) {
         return this.jsonError(400, 'INVALID_GAME_ACTION', 'Tipo de acción no soportada en /action.', cors);
+      }
+
+      if (headerPlayerId && headerPlayerId !== actionMsg.playerId) {
+        return this.jsonError(
+          403,
+          'UNAUTHORIZED_PLAYER',
+          'La identidad de la cabecera X-Player-Id no coincide con la sesión solicitada.',
+          cors
+        );
       }
 
       const suppliedToken =
@@ -493,6 +539,15 @@ export class GameRoom {
         );
       }
 
+      if (!this.rateLimiter.allow(`http:${actionMsg.playerId}`)) {
+        return this.jsonError(
+          429,
+          'RATE_LIMITED',
+          'Demasiadas acciones seguidas. Espera unos segundos.',
+          cors
+        );
+      }
+
       const authRes = await this.executeValidatedGameplayAction(null, loaded.state, {
         ...actionMsg,
         playerToken: suppliedToken,
@@ -504,6 +559,7 @@ export class GameRoom {
         JSON.stringify({
           success: true,
           ok: true,
+          deduplicated: Boolean(authRes.deduplicated),
           event: authRes.event,
           state: loaded.state,
         }),
@@ -712,15 +768,21 @@ export class GameRoom {
       return;
     }
 
-    // Deduplicate actions
+    // Deduplicate actions (preserving idempotent replay for authenticated gameplay operations)
+    await this.ensureProcessedActionsLoaded();
     if ('actionId' in msg) {
-      if (this.processedActionIds.has(msg.actionId)) {
+      if (msg.type === 'JOIN_ROOM' && this.processedActionIds.has(msg.actionId)) {
         return;
       }
-      this.processedActionIds.add(msg.actionId);
-      if (this.processedActionIds.size > 500) {
-        const first = this.processedActionIds.values().next().value;
-        if (first) this.processedActionIds.delete(first);
+      if (!this.processedActionResults.has(msg.actionId)) {
+        if (this.processedActionIds.has(msg.actionId)) {
+          return;
+        }
+        this.processedActionIds.add(msg.actionId);
+        if (this.processedActionIds.size > 500) {
+          const first = this.processedActionIds.values().next().value;
+          if (first) this.processedActionIds.delete(first);
+        }
       }
     }
 
@@ -991,16 +1053,18 @@ export class GameRoom {
       }
     >
   ): Promise<
-    | { ok: true; event: ServerToClientMessage }
+    | { ok: true; deduplicated?: boolean; event: ServerToClientMessage }
     | { ok: false; status: number; code: string; message: string }
   > {
     const db = new DatabaseService(this.env.DB);
     const socketAtt = ws ? this.getSocketAttachment(ws) : undefined;
+    const transport = ws ? 'ws' : 'http';
+    await this.ensureProcessedActionsLoaded();
 
     // 1. Validate socket attachment matches target playerId (prevents spoofing another playerId on open socket)
     if (ws && socketAtt?.playerId && socketAtt.playerId !== msg.playerId) {
       console.warn(
-        `[DO:${state.roomCode}] UNAUTHORIZED_PLAYER action=${msg.type} socketPlayer=${socketAtt.playerId} msgPlayer=${msg.playerId}`
+        `[DO:${state.roomCode}] UNAUTHORIZED_PLAYER action=${msg.type} transport=${transport} socketPlayer=${socketAtt.playerId} msgPlayer=${msg.playerId}`
       );
       return {
         ok: false,
@@ -1021,7 +1085,7 @@ export class GameRoom {
       );
       if (!validToken) {
         console.warn(
-          `[DO:${state.roomCode}] INVALID_PLAYER_TOKEN action=${msg.type} playerId=${msg.playerId}`
+          `[DO:${state.roomCode}] INVALID_PLAYER_TOKEN action=${msg.type} transport=${transport} playerId=${msg.playerId}`
         );
         return {
           ok: false,
@@ -1042,6 +1106,9 @@ export class GameRoom {
     // 3. Verify player actually belongs to this room
     const player = state.players.find((pl) => pl.id === msg.playerId);
     if (!player) {
+      console.warn(
+        `[DO:${state.roomCode}] PLAYER_NOT_FOUND action=${msg.type} transport=${transport} playerId=${msg.playerId}`
+      );
       return {
         ok: false,
         status: 404,
@@ -1050,14 +1117,35 @@ export class GameRoom {
       };
     }
 
+    // 4. Idempotent replay check (prevents duplicate dice rolls on HTTP timeouts or WS reconnects)
+    if ('actionId' in msg && this.processedActionResults.has(msg.actionId)) {
+      const cachedEvent = this.processedActionResults.get(msg.actionId)!;
+      console.log(
+        `[DO:${state.roomCode}] Deduplicated action=${msg.type} transport=${transport} playerId=${msg.playerId} actionId=${msg.actionId}`
+      );
+      if (ws) {
+        this.sendToSocket(ws, cachedEvent);
+      }
+      return { ok: true, deduplicated: true, event: cachedEvent };
+    }
+
+    const finalizeSuccess = async (event: ServerToClientMessage) => {
+      await this.persist();
+      if ('actionId' in msg) {
+        await this.recordProcessedAction(msg.actionId, event);
+      }
+      this.broadcast(event);
+      console.log(
+        `[DO:${state.roomCode}] Gameplay action=${msg.type} transport=${transport} playerId=${msg.playerId} status=ok`
+      );
+      return { ok: true as const, event };
+    };
+
     switch (msg.type) {
       case 'TOGGLE_READY': {
         player.ready = !player.ready;
         state.updatedAt = Date.now();
-        await this.persist();
-        const event: ServerToClientMessage = { type: 'STATE_SYNC', state };
-        this.broadcast(event);
-        return { ok: true, event };
+        return finalizeSuccess({ type: 'STATE_SYNC', state });
       }
 
       case 'SELECT_TEAM': {
@@ -1076,31 +1164,35 @@ export class GameRoom {
         player.teamId = team.id;
         refreshAllTeamRoles(state);
         state.updatedAt = Date.now();
-        await this.persist();
-        const event: ServerToClientMessage = { type: 'STATE_SYNC', state };
-        this.broadcast(event);
-        return { ok: true, event };
+        return finalizeSuccess({ type: 'STATE_SYNC', state });
       }
 
       case 'ROLL_DICE': {
         const questions = await db.getQuestions();
         const rollRes = rollDiceServerSide(state, msg.playerId, questions);
         if (!rollRes.ok || !rollRes.roll) {
+          const code = rollRes.errorCode ?? 'INVALID_ROLL';
+          const status =
+            code === 'PLAYER_NOT_FOUND'
+              ? 404
+              : code === 'NOT_YOUR_TURN' || code === 'INVALID_PHASE' || code === 'ROOM_NOT_PLAYING'
+              ? 409
+              : 403;
+          console.warn(
+            `[DO:${state.roomCode}] Rejected ROLL_DICE transport=${transport} playerId=${msg.playerId} code=${code}`
+          );
           return {
             ok: false,
-            status: 403,
-            code: 'INVALID_ROLL',
+            status,
+            code,
             message: rollRes.error ?? 'Acción de dados no permitida.',
           };
         }
-        await this.persist();
-        const event: ServerToClientMessage = {
+        return finalizeSuccess({
           type: 'DICE_ROLLED',
           roll: rollRes.roll,
           state,
-        };
-        this.broadcast(event);
-        return { ok: true, event };
+        });
       }
 
       case 'SUBMIT_ANSWER': {
@@ -1121,16 +1213,13 @@ export class GameRoom {
         if (state.status === 'finished') {
           await db.saveMatchHistory(buildMatchHistoryFromState(state));
         }
-        await this.persist();
-        const event: ServerToClientMessage = {
+        return finalizeSuccess({
           type: 'ANSWER_RESULT',
           isCorrect: Boolean(ansRes.isCorrect),
           pointsAwarded: ansRes.pointsAwarded ?? 0,
           unlockedBadges: ansRes.unlockedBadges ?? [],
           state,
-        };
-        this.broadcast(event);
-        return { ok: true, event };
+        });
       }
 
       case 'COMPLETE_CHALLENGE_3D': {
@@ -1147,16 +1236,13 @@ export class GameRoom {
             message: chRes.error ?? 'No se pudo completar el desafío 3D.',
           };
         }
-        await this.persist();
-        const event: ServerToClientMessage = {
+        return finalizeSuccess({
           type: 'ANSWER_RESULT',
           isCorrect: Boolean(chRes.isCorrect),
           pointsAwarded: chRes.pointsAwarded ?? 0,
           unlockedBadges: chRes.unlockedBadges ?? [],
           state,
-        };
-        this.broadcast(event);
-        return { ok: true, event };
+        });
       }
 
       case 'NEXT_TURN': {
@@ -1164,16 +1250,13 @@ export class GameRoom {
         if (!player.isTeacher && player.teamId !== activeTeam?.id) {
           return {
             ok: false,
-            status: 403,
-            code: 'UNAUTHORIZED_TURN',
+            status: 409,
+            code: 'NOT_YOUR_TURN',
             message: 'Solo el equipo activo o el docente pueden avanzar al siguiente turno.',
           };
         }
         advanceTurnServerSide(state);
-        await this.persist();
-        const event: ServerToClientMessage = { type: 'STATE_SYNC', state };
-        this.broadcast(event);
-        return { ok: true, event };
+        return finalizeSuccess({ type: 'STATE_SYNC', state });
       }
     }
   }

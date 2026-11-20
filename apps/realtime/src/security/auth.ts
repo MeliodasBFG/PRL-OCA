@@ -184,7 +184,8 @@ export function buildCorsHeaders(
   return {
     'Access-Control-Allow-Origin': allowHeader,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Teacher-Token, X-Teacher-Secret',
+    'Access-Control-Allow-Headers':
+      'Content-Type, Authorization, X-Teacher-Token, X-Teacher-Secret, X-Player-Token, X-Player-Id, Cache-Control',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };
