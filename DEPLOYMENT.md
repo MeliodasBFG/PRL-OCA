@@ -60,7 +60,7 @@ Configúralas en **Pages → Settings → Environment variables** (tanto en *Pro
 | :--- | :--- | :--- |
 | `VITE_API_URL` | `https://prl-oca-realtime.<tu-subdominio>.workers.dev` *(o tu dominio personalizado HTTPS del Worker)* | Peticiones REST (`POST /api/rooms`, `GET /api/rooms/:code`) en `useGameStore.ts` |
 | `VITE_WS_URL` | `wss://prl-oca-realtime.<tu-subdominio>.workers.dev` *(siempre `wss://`)* | WebSocket en tiempo real en `wsClient.ts` (`/ws/:roomCode`). Si por error se pusiera `https://`, `networkConfig.ts` lo normaliza automáticamente a `wss://` en orígenes HTTPS |
-| `VITE_ENABLE_LOCAL_FALLBACK` | `false` *(recomendado en producción)* o `true` *(modo demo offline)* | En `false`, muestra error explícito si falla el Worker en lugar de abrir salas locales aisladas |
+| `VITE_ENABLE_LOCAL_FALLBACK` | `false` *(recomendado en producción; además en dominios `*.pages.dev` o HTTPS no locales se desactiva automáticamente)* | En `false`, nunca simula salas offline ni acepta códigos inventados cuando falla el Worker |
 | `NODE_VERSION` | `22` | Garantiza Node `>=20.0.0` durante la compilación en Pages |
 | `VITE_TEACHER_ACCESS_PIN` | *(Opcional)* Clave para abrir el Editor local de Preguntas | Si se deja sin definir, el editor solicita un PIN local de mínimo 4 caracteres (ten en cuenta que cualquier `VITE_*` forma parte del bundle del navegador) |
 
@@ -71,7 +71,7 @@ Configúralas en **Pages → Settings → Environment variables** (tanto en *Pro
 #### 1. Variables de entorno no secretas (`vars` en `apps/realtime/wrangler.jsonc`)
 En `apps/realtime/wrangler.jsonc` (tanto en el bloque raíz por defecto como en `env.production.vars`, para que cualquier despliegue CI con o sin `--env production` use siempre producción):
 - `ENVIRONMENT`: `"production"`
-- `ALLOWED_ORIGIN`: `"https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev"` — **sustitúyelo o amplíalo** con el dominio `.pages.dev` exacto asignado a tu proyecto Pages y tu dominio personalizado si añades uno (no usa `"*"` en producción ni en preview).
+- `ALLOWED_ORIGIN`: `"https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev,https://prl-oca-3d-online.pages.dev,https://*.prl-oca-3d-online.pages.dev,https://prl-oca.pages.dev,https://*.prl-oca.pages.dev"` — **sustitúyelo o amplíalo** si tu proyecto Cloudflare Pages tiene un subdominio distinto o dominio propio (no usa `"*"` en producción ni en preview).
 
 > El módulo `apps/realtime/src/security/auth.ts` valida orígenes múltiples separados por coma y subdominios wildcard de `pages.dev` tanto en peticiones HTTP CORS (`Access-Control-Allow-Origin` + `Vary: Origin`) como en el handshake WebSocket (`403` si un sitio externo no autorizado intenta conectarse en producción).
 

@@ -146,7 +146,8 @@ export class GameRoom {
       return new Response(null, { status: 204, headers: cors });
     }
 
-    const rawRoomCode = url.searchParams.get('roomCode') ?? '';
+    try {
+      const rawRoomCode = url.searchParams.get('roomCode') ?? '';
     const roomCode = normalizeRoomCode(rawRoomCode);
 
     // Check whether code slot is already occupied (used during collision-free room creation)
@@ -467,6 +468,16 @@ export class GameRoom {
     }
 
     return this.jsonError(404, 'ROUTE_NOT_FOUND', 'Ruta no encontrada en GameRoom', cors);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(`[DO] Unhandled error in GameRoom.fetch: ${detail}`);
+      return this.jsonError(
+        500,
+        'DURABLE_OBJECT_ERROR',
+        `Error en almacenamiento o lógica de Durable Object GameRoom: ${detail}`,
+        cors
+      );
+    }
   }
 
   public async webSocketMessage(ws: WebSocket, rawMessage: string | ArrayBuffer): Promise<void> {

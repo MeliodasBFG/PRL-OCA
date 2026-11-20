@@ -25,6 +25,9 @@ import { ConnectionState, mpClient } from '../multiplayer/wsClient';
 import { soundEngine } from '../audio/SoundEngine';
 import { enterGameLandscapeMode, exitGameLandscapeMode } from '../utils/mobileOrientation';
 import {
+  diagnoseFetchConnectionFailure,
+  formatServerHttpDiagnostic,
+  hasConfiguredApiEnv,
   isLocalFallbackEnabled,
   isProductionEnvironment,
   resolveApiBaseUrl,
@@ -736,6 +739,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const apiBase = resolveApiBaseUrl();
       const allowLocalFallback = isLocalFallbackEnabled();
+      const inProduction = isProductionEnvironment();
       const cleanTeacherPin =
         teacherPin.trim() || `DOC${Math.floor(100 + Math.random() * 900)}`;
       let roomCode = `PRL${Math.floor(100 + Math.random() * 900)}`;
@@ -743,52 +747,76 @@ export const useGameStore = create<GameStore>((set, get) => {
       let token = cleanTeacherPin;
       let createdOnServer = false;
       let serverError: string | null = null;
+      let localWorkerUnreachableOnly = false;
 
-      if (apiBase) {
+      if (!apiBase) {
+        serverError =
+          'No se ha configurado VITE_API_URL / VITE_WS_URL en Cloudflare Pages para conectar con Cloudflare Workers.';
+      } else {
+        const targetUrl = `${apiBase}/api/rooms`;
         try {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 10000);
-          const res = await fetch(`${apiBase}/api/rooms`, {
+          const timeout = setTimeout(() => controller.abort(), 12000);
+          const res = await fetch(targetUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config, teacherPin: cleanTeacherPin, teacherName }),
             signal: controller.signal,
           });
           clearTimeout(timeout);
-          if (res.ok) {
-            const data = (await res.json()) as {
-              ok: boolean;
-              roomCode: string;
-              teacherToken: string;
-              state: GameRoomState;
-            };
-            if (data.ok && data.roomCode) {
-              roomCode = normalizeRoomCode(data.roomCode);
-              initialState = data.state;
-              token = data.teacherToken;
-              createdOnServer = true;
-            }
+          const payload = (await res.json().catch(() => null)) as {
+            ok?: boolean;
+            success?: boolean;
+            error?: string;
+            message?: string;
+            roomCode?: string;
+            teacherToken?: string;
+            state?: GameRoomState;
+          } | null;
+
+          if (res.ok && payload?.ok && payload.roomCode && payload.state) {
+            roomCode = normalizeRoomCode(payload.roomCode);
+            initialState = payload.state;
+            token = payload.teacherToken ?? token;
+            createdOnServer = true;
           } else {
-            const errJson = (await res.json().catch(() => null)) as {
-              error?: string;
-              message?: string;
-            } | null;
-            serverError =
-              errJson?.message ?? errJson?.error ?? `Error del servidor (${res.status}).`;
+            serverError = formatServerHttpDiagnostic({
+              status: res.status,
+              errorCode: payload?.error,
+              serverMessage: payload?.message ?? payload?.error,
+              targetUrl,
+              origin: typeof window !== 'undefined' ? window.location.origin : undefined,
+            });
           }
-        } catch {
-          serverError = 'No se pudo conectar con el servidor Cloudflare Workers.';
+        } catch (err) {
+          const isAbort = err instanceof Error && err.name === 'AbortError';
+          if (!inProduction && allowLocalFallback && !hasConfiguredApiEnv() && !isAbort) {
+            localWorkerUnreachableOnly = true;
+          }
+          serverError = await diagnoseFetchConnectionFailure({
+            error: err,
+            apiBase,
+            targetUrl,
+            actionLabel: 'crear la sala',
+          });
         }
       }
 
-      const mustRequireServer = isProductionEnvironment() || !allowLocalFallback || Boolean(apiBase);
+      const mustRequireServer =
+        inProduction ||
+        !allowLocalFallback ||
+        hasConfiguredApiEnv() ||
+        !localWorkerUnreachableOnly;
       if (!createdOnServer && mustRequireServer) {
         set({
           errorMessage:
             serverError ??
-            'No se ha podido crear la sala en el servidor. Comprueba tu conexión e inténtalo de nuevo.',
+            'No se ha podido crear la sala en el servidor Cloudflare Workers. Comprueba la consola del navegador para ver el detalle técnico.',
         });
         return;
+      }
+      if (!createdOnServer) {
+        console.info('[PRL-OCA][Dev] Creando sala en modo desarrollo local (sin Worker activo).');
       }
 
       const playerId = get().playerId;
@@ -923,9 +951,20 @@ export const useGameStore = create<GameStore>((set, get) => {
             }
           } else {
             serverErrorCode = payload?.error;
-            serverErrorMessage = payload?.message ?? payload?.error ?? null;
+            serverErrorMessage = formatServerHttpDiagnostic({
+              status: res.status,
+              errorCode: payload?.error,
+              serverMessage: payload?.message ?? payload?.error,
+              targetUrl: `${apiBase}/api/rooms/${cleanCode}/join`,
+              origin: typeof window !== 'undefined' ? window.location.origin : undefined,
+            });
           }
-        } catch {
+        } catch (err) {
+          console.error('[PRL-OCA][JoinRoom] Fallo de red/CORS verificando sala', {
+            roomCode: cleanCode,
+            apiBase,
+            error: err instanceof Error ? err.message : String(err),
+          });
           serverErrorMessage =
             'No se ha podido verificar la sala. Comprueba tu conexión e inténtalo de nuevo.';
         }
@@ -941,7 +980,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       // In production or when server validation failed/unreachable, NEVER fall back to fake local rooms
       if (!loadedFromServer) {
-        const localOnlyMode = !inProduction && allowLocalFallback && !apiBase;
+        const localOnlyMode = !inProduction && allowLocalFallback && !hasConfiguredApiEnv();
         const cachedLocalState = localOnlyMode ? mpClient.loadCachedRoomState(cleanCode) : null;
         if (cachedLocalState) {
           state = cachedLocalState;
@@ -949,7 +988,8 @@ export const useGameStore = create<GameStore>((set, get) => {
           set({
             errorMessage:
               serverStatus === 0 || serverStatus >= 500
-                ? 'No se ha podido verificar la sala. Comprueba tu conexión e inténtalo de nuevo.'
+                ? serverErrorMessage ??
+                  'No se ha podido verificar la sala. Comprueba tu conexión e inténtalo de nuevo.'
                 : mapRoomErrorMessage(serverErrorCode, serverErrorMessage ?? undefined),
           });
           return;

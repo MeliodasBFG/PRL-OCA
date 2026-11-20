@@ -5,7 +5,7 @@
   "compatibility_date": "2025-01-01",
   "workers_dev": true,
   "vars": {
-    "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev",
+    "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev,https://prl-oca-3d-online.pages.dev,https://*.prl-oca-3d-online.pages.dev,https://prl-oca.pages.dev,https://*.prl-oca.pages.dev",
     "ENVIRONMENT": "production"
   },
   "durable_objects": {
@@ -67,7 +67,7 @@
       "name": "prl-oca-realtime-preview",
       "workers_dev": true,
       "vars": {
-        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev",
+        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev,https://prl-oca-3d-online.pages.dev,https://*.prl-oca-3d-online.pages.dev,https://prl-oca.pages.dev,https://*.prl-oca.pages.dev",
         "ENVIRONMENT": "preview"
       },
       "durable_objects": {
@@ -91,7 +91,7 @@
       "name": "prl-oca-realtime",
       "workers_dev": true,
       "vars": {
-        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev",
+        "ALLOWED_ORIGIN": "https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev,https://prl-oca-3d-online.pages.dev,https://*.prl-oca-3d-online.pages.dev,https://prl-oca.pages.dev,https://*.prl-oca.pages.dev",
         "ENVIRONMENT": "production"
       },
       "durable_objects": {

@@ -114,8 +114,8 @@ export class RateLimiter {
 
 function matchesOriginPattern(origin: string, pattern: string): boolean {
   if (pattern === '*') return true;
-  const cleanPattern = pattern.trim().replace(/\/$/, '');
-  const cleanOrigin = origin.trim().replace(/\/$/, '');
+  const cleanPattern = pattern.trim().replace(/\/$/, '').toLowerCase();
+  const cleanOrigin = origin.trim().replace(/\/$/, '').toLowerCase();
   if (!cleanPattern || !cleanOrigin) return false;
   if (cleanOrigin === cleanPattern) return true;
 
