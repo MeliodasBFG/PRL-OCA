@@ -31,8 +31,8 @@ export const CreateJoinScreen: React.FC = () => {
   // Join Room Form State
   const [joinCode, setJoinCode] = useState('PRL101');
   const [joinAlias, setJoinAlias] = useState(() => {
-    if (typeof window === 'undefined') return 'Alumno/a PRL';
-    return window.sessionStorage.getItem('prl_oca_player_name') || 'Alumno/a PRL';
+    if (typeof window === 'undefined') return '';
+    return window.sessionStorage.getItem('prl_oca_player_name') || '';
   });
   const [joinRole, setJoinRole] = useState<'player' | 'spectator' | 'teacher'>('player');
   const [joinTeacherPin, setJoinTeacherPin] = useState('');
@@ -275,7 +275,9 @@ export const CreateJoinScreen: React.FC = () => {
                 <input
                   type="text"
                   required
+                  minLength={2}
                   maxLength={36}
+                  placeholder="Ej. Laura G."
                   value={joinAlias}
                   onChange={(e) => setJoinAlias(e.target.value)}
                 />

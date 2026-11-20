@@ -9,6 +9,7 @@ import {
   TeacherCommandSchema,
   buildMatchHistoryFromState,
   advanceTurnServerSide,
+  canPlayerActOnTeamTurn,
   completeChallenge3DServerSide,
   createInitialRoomState,
   disconnectPlayerFromState,
@@ -1203,10 +1204,12 @@ export class GameRoom {
           msg.collaborated ?? true
         );
         if (!ansRes.ok) {
+          const code = ansRes.errorCode ?? 'INVALID_ANSWER';
+          const status = code === 'PLAYER_NOT_FOUND' ? 404 : code === 'NOT_YOUR_TURN' ? 409 : 400;
           return {
             ok: false,
-            status: 400,
-            code: 'INVALID_ANSWER',
+            status,
+            code,
             message: ansRes.error ?? 'No se pudo procesar la respuesta.',
           };
         }
@@ -1229,10 +1232,12 @@ export class GameRoom {
           msg.selectedHotspotIds
         );
         if (!chRes.ok) {
+          const code = chRes.errorCode ?? 'INVALID_CHALLENGE';
+          const status = code === 'PLAYER_NOT_FOUND' ? 404 : code === 'NOT_YOUR_TURN' ? 409 : 400;
           return {
             ok: false,
-            status: 400,
-            code: 'INVALID_CHALLENGE',
+            status,
+            code,
             message: chRes.error ?? 'No se pudo completar el desafío 3D.',
           };
         }
@@ -1246,13 +1251,15 @@ export class GameRoom {
       }
 
       case 'NEXT_TURN': {
-        const activeTeam = state.teams[state.activeTeamIndex];
-        if (!player.isTeacher && player.teamId !== activeTeam?.id) {
+        const turnAuth = canPlayerActOnTeamTurn(state, msg.playerId);
+        if (!turnAuth.allowed) {
           return {
             ok: false,
-            status: 409,
-            code: 'NOT_YOUR_TURN',
-            message: 'Solo el equipo activo o el docente pueden avanzar al siguiente turno.',
+            status: turnAuth.errorCode === 'PLAYER_NOT_FOUND' ? 404 : 409,
+            code: turnAuth.errorCode ?? 'NOT_YOUR_TURN',
+            message:
+              turnAuth.reason ??
+              'Solo el equipo activo o el docente pueden avanzar al siguiente turno.',
           };
         }
         advanceTurnServerSide(state);

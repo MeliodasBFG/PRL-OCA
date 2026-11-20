@@ -11,6 +11,7 @@ import {
   ServerToClientMessage,
   advanceTurnServerSide,
   buildMatchHistoryFromState,
+  canPlayerActOnTeamTurn,
   completeChallenge3DServerSide,
   createInitialRoomState,
   disconnectPlayerFromState,
@@ -1101,14 +1102,18 @@ export const useGameStore = create<GameStore>((set, get) => {
       const allowLocalFallback = isLocalFallbackEnabled();
       const inProduction = isProductionEnvironment();
       const cleanAlias = playerName.trim() || 'Participante';
-      const currentPlayerId = get().playerId;
       const existingToken = loadSessionPlayerToken(cleanCode);
+      const rawCurrentPlayerId = get().playerId;
+      const currentPlayerId =
+        !isTeacher && rawCurrentPlayerId.startsWith('teacher_') && !existingToken
+          ? `plr_${Math.random().toString(36).slice(2, 10)}`
+          : rawCurrentPlayerId;
 
       let state: GameRoomState | null = null;
       let loadedFromServer = false;
       let resolvedPlayerId = currentPlayerId;
       let resolvedPlayerToken = existingToken ?? '';
-      let resolvedTeacherToken = get().teacherToken;
+      let resolvedTeacherToken = isTeacher ? get().teacherToken : '';
       let serverStatus = 0;
       let serverErrorCode: string | undefined;
       let serverErrorMessage: string | null = null;
@@ -1390,6 +1395,8 @@ export const useGameStore = create<GameStore>((set, get) => {
 
     leaveRoom: () => {
       clearMovementTimers();
+      inFlightSlotActions.clear();
+      pendingSlotActionIds.clear();
       get().markLocalDisconnect();
       mpClient.disconnect();
       soundEngine.playMusic('menu');
@@ -1398,6 +1405,10 @@ export const useGameStore = create<GameStore>((set, get) => {
         roomState: null,
         isRemoteSession: false,
         playerToken: '',
+        isTeacher: false,
+        isSpectator: false,
+        teacherPin: '',
+        teacherToken: '',
         screen: 'home',
         projectorMode: false,
         showTeacherPanel: false,
@@ -1495,6 +1506,19 @@ export const useGameStore = create<GameStore>((set, get) => {
       const state = get().roomState;
       if (!state || get().isRollingAnimation || get().isTokenMoving) return;
 
+      const playerId = get().playerId;
+      const initialActiveTeam = state.teams[state.activeTeamIndex];
+      const isBotTurn = Boolean(
+        !get().isRemoteSession &&
+          state.players.some((p) => p.id === 'bot_companero' && p.teamId === initialActiveTeam?.id)
+      );
+      const actorId = isBotTurn ? 'bot_companero' : playerId;
+      const turnAuth = canPlayerActOnTeamTurn(state, actorId);
+      if (!turnAuth.allowed) {
+        set({ errorMessage: turnAuth.reason ?? 'No es tu turno para lanzar los dados.' });
+        return;
+      }
+
       const rollSlotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:waiting_roll:ROLL_DICE`;
       if (inFlightSlotActions.has(rollSlotKey)) {
         return;
@@ -1511,7 +1535,6 @@ export const useGameStore = create<GameStore>((set, get) => {
         errorMessage: null,
       }));
 
-      const playerId = get().playerId;
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
 
       // 1.15s of 3D dice tumbling before settling on the server-determined face
@@ -1555,8 +1578,10 @@ export const useGameStore = create<GameStore>((set, get) => {
         }
 
         const activeTeam = curRoom.teams[curRoom.activeTeamIndex];
-        const effectiveRoller =
-          curRoom.players.find((p) => p.teamId === activeTeam?.id)?.id ?? playerId;
+        const isBotLocal = curRoom.players.some(
+          (p) => p.id === 'bot_companero' && p.teamId === activeTeam?.id
+        );
+        const effectiveRoller = isBotLocal ? 'bot_companero' : playerId;
 
         const res = rollDiceServerSide(curRoom, effectiveRoller, get().questionBank);
         if (!res.ok) {
@@ -1586,6 +1611,12 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (!state) return;
 
       const playerId = get().playerId;
+      const turnAuth = canPlayerActOnTeamTurn(state, playerId);
+      if (!turnAuth.allowed) {
+        set({ errorMessage: turnAuth.reason ?? 'Solo el equipo en turno puede responder.' });
+        return;
+      }
+
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
       const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:SUBMIT_ANSWER`;
       const msg = {
@@ -1611,11 +1642,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const activeTeam = state.teams[state.activeTeamIndex];
-      const effectivePlayer =
-        state.players.find((p) => p.teamId === activeTeam?.id)?.id ?? playerId;
-
-      const res = submitAnswerServerSide(state, effectivePlayer, selectedIndices, collaborated);
+      const res = submitAnswerServerSide(state, playerId, selectedIndices, collaborated);
       if (!res.ok) {
         set({ errorMessage: res.error ?? null });
         return;
@@ -1652,6 +1679,12 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (!state) return;
 
       const playerId = get().playerId;
+      const turnAuth = canPlayerActOnTeamTurn(state, playerId);
+      if (!turnAuth.allowed) {
+        set({ errorMessage: turnAuth.reason ?? 'Solo el equipo en turno puede validar el desafío.' });
+        return;
+      }
+
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
       const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:COMPLETE_CHALLENGE_3D`;
       const msg = {
@@ -1676,11 +1709,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const activeTeam = state.teams[state.activeTeamIndex];
-      const effectivePlayer =
-        state.players.find((p) => p.teamId === activeTeam?.id)?.id ?? playerId;
-
-      const res = completeChallenge3DServerSide(state, effectivePlayer, selectedHotspotIds);
+      const res = completeChallenge3DServerSide(state, playerId, selectedHotspotIds);
       if (!res.ok) {
         set({ errorMessage: res.error ?? null });
         return;
@@ -1699,11 +1728,18 @@ export const useGameStore = create<GameStore>((set, get) => {
     nextTurn: () => {
       const state = get().roomState;
       if (!state) return;
+
+      const playerId = get().playerId;
+      const turnAuth = canPlayerActOnTeamTurn(state, playerId);
+      if (!turnAuth.allowed) {
+        set({ errorMessage: turnAuth.reason ?? 'Solo el equipo activo o el docente pueden continuar.' });
+        return;
+      }
+
       clearMovementTimers();
       soundEngine.playSfx('button_click');
       soundEngine.playMusic('board');
 
-      const playerId = get().playerId;
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
       const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:${state.phase}:NEXT_TURN`;
       const msg = {

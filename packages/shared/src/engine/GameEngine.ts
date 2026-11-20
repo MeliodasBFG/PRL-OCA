@@ -545,6 +545,69 @@ export function secureRandomDie(): number {
   return Math.floor(Math.random() * 6) + 1;
 }
 
+export function canPlayerActOnTeamTurn(
+  state: GameRoomState,
+  playerId: string
+): {
+  allowed: boolean;
+  errorCode?: 'ROOM_NOT_PLAYING' | 'INVALID_TEAM' | 'PLAYER_NOT_FOUND' | 'NOT_YOUR_TURN';
+  reason?: string;
+  activeTeam?: Team;
+  player?: Player;
+} {
+  if (state.status !== 'playing') {
+    return {
+      allowed: false,
+      errorCode: 'ROOM_NOT_PLAYING',
+      reason: 'La partida no está en curso.',
+    };
+  }
+
+  const activeTeam = state.teams[state.activeTeamIndex];
+  if (!activeTeam) {
+    return {
+      allowed: false,
+      errorCode: 'INVALID_TEAM',
+      reason: 'No hay equipo activo seleccionado.',
+    };
+  }
+
+  const player = state.players.find((p) => p.id === playerId);
+  if (!player) {
+    return {
+      allowed: false,
+      errorCode: 'PLAYER_NOT_FOUND',
+      reason: 'Jugador no reconocido en la sala.',
+      activeTeam,
+    };
+  }
+
+  if (player.isSpectator) {
+    return {
+      allowed: false,
+      errorCode: 'NOT_YOUR_TURN',
+      reason: `El modo espectador es solo de lectura. Es el turno del ${activeTeam.name}.`,
+      activeTeam,
+      player,
+    };
+  }
+
+  // Only a supervising admin teacher (!participatesAsPlayer) can trigger turns from the classroom view.
+  // Any student (or teacher participating as a player) can ONLY act during their own team's turn.
+  const isSupervisingTeacher = Boolean(player.isTeacher && !player.participatesAsPlayer);
+  if (!isSupervisingTeacher && player.teamId !== activeTeam.id) {
+    return {
+      allowed: false,
+      errorCode: 'NOT_YOUR_TURN',
+      reason: `No es tu turno. Es el turno del ${activeTeam.name}.`,
+      activeTeam,
+      player,
+    };
+  }
+
+  return { allowed: true, activeTeam, player };
+}
+
 export function rollDiceServerSide(
   state: GameRoomState,
   playerId: string,
@@ -567,30 +630,16 @@ export function rollDiceServerSide(
     };
   }
 
-  const activeTeam = state.teams[state.activeTeamIndex];
-  if (!activeTeam) {
+  const turnAuth = canPlayerActOnTeamTurn(state, playerId);
+  if (!turnAuth.allowed || !turnAuth.activeTeam || !turnAuth.player) {
     return {
       ok: false,
-      errorCode: 'INVALID_TEAM',
-      error: 'No hay equipo activo seleccionado.',
+      errorCode: turnAuth.errorCode ?? 'NOT_YOUR_TURN',
+      error: turnAuth.reason ?? 'No puedes lanzar el dado en este turno.',
     };
   }
 
-  const player = state.players.find((p) => p.id === playerId);
-  if (!player) {
-    return {
-      ok: false,
-      errorCode: 'PLAYER_NOT_FOUND',
-      error: 'Jugador no reconocido en la sala.',
-    };
-  }
-  if (!player.isTeacher && player.teamId !== activeTeam.id) {
-    return {
-      ok: false,
-      errorCode: 'NOT_YOUR_TURN',
-      error: `Es el turno del ${activeTeam.name}.`,
-    };
-  }
+  const activeTeam = turnAuth.activeTeam;
 
   const diceCount = state.config.diceMode === '2d6' ? 2 : 1;
   const dice: number[] = [];
@@ -750,29 +799,31 @@ export function submitAnswerServerSide(
   collaborated = true
 ): {
   ok: boolean;
+  errorCode?: 'NOT_YOUR_TURN' | 'PLAYER_NOT_FOUND' | 'INVALID_ANSWER';
   error?: string;
   isCorrect?: boolean;
   pointsAwarded?: number;
   unlockedBadges?: BadgeId[];
 } {
   if (state.status !== 'playing' || state.phase !== 'answering' || !state.activeChallenge) {
-    return { ok: false, error: 'No hay ninguna pregunta activa para responder.' };
+    return { ok: false, errorCode: 'INVALID_ANSWER', error: 'No hay ninguna pregunta activa para responder.' };
   }
   if (state.activeChallenge.kind !== 'question' || !state.activeChallenge.question) {
-    return { ok: false, error: 'El reto actual es un desafío 3D interactivo.' };
+    return { ok: false, errorCode: 'INVALID_ANSWER', error: 'El reto actual es un desafío 3D interactivo.' };
   }
   if (state.activeChallenge.answered) {
-    return { ok: false, error: 'Esta pregunta ya ha sido respondida.' };
+    return { ok: false, errorCode: 'INVALID_ANSWER', error: 'Esta pregunta ya ha sido respondida.' };
   }
 
-  const activeTeam = state.teams[state.activeTeamIndex];
-  const player = state.players.find((p) => p.id === playerId);
-  if (!player) {
-    return { ok: false, error: 'Jugador no reconocido en la sala.' };
+  const turnAuth = canPlayerActOnTeamTurn(state, playerId);
+  if (!turnAuth.allowed || !turnAuth.activeTeam || !turnAuth.player) {
+    return {
+      ok: false,
+      errorCode: turnAuth.errorCode === 'PLAYER_NOT_FOUND' ? 'PLAYER_NOT_FOUND' : 'NOT_YOUR_TURN',
+      error: turnAuth.reason ?? 'Solo el equipo en turno puede responder.',
+    };
   }
-  if (!player.isTeacher && player.teamId !== activeTeam.id) {
-    return { ok: false, error: `Solo el ${activeTeam.name} puede responder en su turno.` };
-  }
+  const activeTeam = turnAuth.activeTeam;
 
   const q = state.activeChallenge.question;
   let isCorrect = false;
@@ -905,29 +956,31 @@ export function completeChallenge3DServerSide(
   selectedHotspotIds: string[]
 ): {
   ok: boolean;
+  errorCode?: 'NOT_YOUR_TURN' | 'PLAYER_NOT_FOUND' | 'INVALID_CHALLENGE';
   error?: string;
   isCorrect?: boolean;
   pointsAwarded?: number;
   unlockedBadges?: BadgeId[];
 } {
   if (state.status !== 'playing' || state.phase !== 'answering' || !state.activeChallenge) {
-    return { ok: false, error: 'No hay ningún desafío 3D activo.' };
+    return { ok: false, errorCode: 'INVALID_CHALLENGE', error: 'No hay ningún desafío 3D activo.' };
   }
   if (state.activeChallenge.kind !== 'challenge3d' || !state.activeChallenge.challenge3d) {
-    return { ok: false, error: 'El reto actual no es un desafío 3D.' };
+    return { ok: false, errorCode: 'INVALID_CHALLENGE', error: 'El reto actual no es un desafío 3D.' };
   }
   if (state.activeChallenge.answered) {
-    return { ok: false, error: 'Este desafío 3D ya ha sido completado.' };
+    return { ok: false, errorCode: 'INVALID_CHALLENGE', error: 'Este desafío 3D ya ha sido completado.' };
   }
 
-  const activeTeam = state.teams[state.activeTeamIndex];
-  const player = state.players.find((p) => p.id === playerId);
-  if (!player) {
-    return { ok: false, error: 'Jugador no reconocido en la sala.' };
+  const turnAuth = canPlayerActOnTeamTurn(state, playerId);
+  if (!turnAuth.allowed || !turnAuth.activeTeam || !turnAuth.player) {
+    return {
+      ok: false,
+      errorCode: turnAuth.errorCode === 'PLAYER_NOT_FOUND' ? 'PLAYER_NOT_FOUND' : 'NOT_YOUR_TURN',
+      error: turnAuth.reason ?? 'Solo el equipo en turno puede resolver este desafío.',
+    };
   }
-  if (!player.isTeacher && player.teamId !== activeTeam.id) {
-    return { ok: false, error: `Solo el ${activeTeam.name} puede resolver este desafío.` };
-  }
+  const activeTeam = turnAuth.activeTeam;
 
   const challenge = state.activeChallenge.challenge3d;
   const correctIds = challenge.hotspots.filter((h) => h.isCorrect).map((h) => h.id);
@@ -1030,12 +1083,33 @@ export function advanceTurnServerSide(state: GameRoomState): void {
     currentTeam.roleRotationOffset += 1;
   }
 
-  // Move to next team
+  // Move to next active team (in individual mode skip empty unassigned slots)
   const teamCount = state.teams.length;
-  state.activeTeamIndex = (state.activeTeamIndex + 1) % teamCount;
-  if (state.activeTeamIndex === 0) {
+  const hasOccupiedTeams =
+    state.config.mode === 'individual' &&
+    state.teams.some((t) =>
+      state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
+    );
+
+  let nextIdx = (state.activeTeamIndex + 1) % teamCount;
+  if (nextIdx === 0) {
     state.turnNumber += 1;
   }
+  if (hasOccupiedTeams) {
+    for (let step = 0; step < teamCount; step++) {
+      const candidate = state.teams[nextIdx];
+      const occupied = Boolean(
+        candidate &&
+          state.players.some((p) => p.teamId === candidate.id && isPlayerCountedAsParticipant(p))
+      );
+      if (occupied) break;
+      nextIdx = (nextIdx + 1) % teamCount;
+      if (nextIdx === 0) {
+        state.turnNumber += 1;
+      }
+    }
+  }
+  state.activeTeamIndex = nextIdx;
 
   refreshAllTeamRoles(state);
   state.phase = 'waiting_roll';
@@ -1146,7 +1220,13 @@ export function executeTeacherCommandServerSide(
       state.phase = 'waiting_roll';
       state.startedAt = now;
       state.turnNumber = 1;
-      state.activeTeamIndex = 0;
+      const firstOccupiedIdx =
+        state.config.mode === 'individual'
+          ? state.teams.findIndex((t) =>
+              state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
+            )
+          : 0;
+      state.activeTeamIndex = firstOccupiedIdx >= 0 ? firstOccupiedIdx : 0;
       state.winnerTeamId = null;
       refreshAllTeamRoles(state);
       state.logs.unshift(

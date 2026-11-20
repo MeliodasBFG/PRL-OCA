@@ -27,6 +27,7 @@ import {
   TILE_TYPE_LABELS,
   TileDefinition,
   WrongAnswerPenalty,
+  canPlayerActOnTeamTurn,
   getRoomParticipantStats,
 } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
@@ -137,6 +138,7 @@ export const GameScreen: React.FC = () => {
     isRollingAnimation,
     isTokenMoving,
     challengeModalReady,
+    playerId,
     isTeacher,
     projectorMode,
     showTeacherPanel,
@@ -193,6 +195,8 @@ export const GameScreen: React.FC = () => {
     return b.score - a.score;
   });
   const participantStats = getRoomParticipantStats(roomState);
+  const turnAuth = canPlayerActOnTeamTurn(roomState, playerId);
+  const isMyTurn = turnAuth.allowed;
 
   const anyModalOpen = Boolean(
     (roomState.activeChallenge &&
@@ -418,9 +422,15 @@ export const GameScreen: React.FC = () => {
                   currentTile.specialEffect?.explanation ??
                   currentTile.subtitle}
               </p>
-              <button type="button" className="btn-primary btn-lg" onClick={nextTurn}>
-                <FastForward size={18} /> Continuar Recorrido
-              </button>
+              {isMyTurn ? (
+                <button type="button" className="btn-primary btn-lg" onClick={nextTurn}>
+                  <FastForward size={18} /> Continuar Recorrido
+                </button>
+              ) : (
+                <button type="button" className="btn-secondary btn-lg" disabled>
+                  Esperando a {activeTeam?.name.split('(')[0].trim()}...
+                </button>
+              )}
             </div>
           )}
 
@@ -525,11 +535,16 @@ export const GameScreen: React.FC = () => {
             {!projectorMode && roomState.phase === 'waiting_roll' && (
               <button
                 type="button"
-                className="btn-roll-dice-3d"
+                className={`btn-roll-dice-3d ${!isMyTurn ? 'turn-locked' : ''}`}
                 disabled={
-                  isRollingAnimation || isTokenMoving || roomState.status !== 'playing'
+                  !isMyTurn || isRollingAnimation || isTokenMoving || roomState.status !== 'playing'
                 }
-                onClick={rollDice}
+                onClick={isMyTurn ? rollDice : undefined}
+                title={
+                  isMyTurn
+                    ? 'Lanzar los dados en tu turno'
+                    : turnAuth.reason ?? `Es el turno de ${activeTeam?.name.split('(')[0].trim()}`
+                }
               >
                 <Dices size={24} />
                 <div>
@@ -538,9 +553,15 @@ export const GameScreen: React.FC = () => {
                       ? 'LANZANDO DADOS 3D...'
                       : isTokenMoving
                       ? 'AVANZANDO FICHA...'
+                      : !isMyTurn
+                      ? 'ESPERANDO TURNO'
                       : 'LANZAR DADOS 3D'}
                   </strong>
-                  <span>Turno de {activeTeam?.name.split('(')[0].trim()}</span>
+                  <span>
+                    {isMyTurn
+                      ? `Tu turno · ${activeTeam?.name.split('(')[0].trim()}`
+                      : `Turno de ${activeTeam?.name.split('(')[0].trim()}`}
+                  </span>
                 </div>
               </button>
             )}

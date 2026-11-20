@@ -7,6 +7,7 @@ import {
   ShieldAlert,
   Sparkles,
 } from 'lucide-react';
+import { canPlayerActOnTeamTurn } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 import { ChallengeScene3D } from '../scenes/ChallengeScene3D';
 import { soundEngine } from '../audio/SoundEngine';
@@ -14,6 +15,7 @@ import { soundEngine } from '../audio/SoundEngine';
 export const ChallengeModal: React.FC = () => {
   const {
     roomState,
+    playerId,
     isRollingAnimation,
     isTokenMoving,
     challengeModalReady,
@@ -23,6 +25,8 @@ export const ChallengeModal: React.FC = () => {
   const activeChallenge = roomState?.activeChallenge;
   const challenge =
     activeChallenge?.kind === 'challenge3d' ? activeChallenge.challenge3d : undefined;
+  const activeTeam = roomState?.teams[roomState.activeTeamIndex ?? 0];
+  const isMyTurn = roomState ? canPlayerActOnTeamTurn(roomState, playerId).allowed : false;
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [secondsLeft, setSecondsLeft] = useState<number>(90);
@@ -59,7 +63,9 @@ export const ChallengeModal: React.FC = () => {
       if (rem === 0) {
         soundEngine.playSfx('time_up');
         clearInterval(timer);
-        completeChallenge3D(selectedIds.length > 0 ? selectedIds : ['timeout']);
+        if (isMyTurn) {
+          completeChallenge3D(selectedIds.length > 0 ? selectedIds : ['timeout']);
+        }
       }
     }, 1000);
     return () => clearInterval(timer);
@@ -69,6 +75,7 @@ export const ChallengeModal: React.FC = () => {
     activeChallenge?.answered,
     activeChallenge?.expiresAt,
     roomState?.status,
+    isMyTurn,
     selectedIds,
     completeChallenge3D,
   ]);
@@ -81,7 +88,7 @@ export const ChallengeModal: React.FC = () => {
   const isCorrect = Boolean(activeChallenge.isCorrect);
 
   const toggleHotspot = (id: string) => {
-    if (isAnswered) return;
+    if (isAnswered || !isMyTurn) return;
     soundEngine.playSfx('button_click');
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
@@ -173,7 +180,11 @@ export const ChallengeModal: React.FC = () => {
             )}
 
             <div className="q-footer-bar">
-              {!isAnswered ? (
+              {!isMyTurn ? (
+                <button type="button" className="btn-secondary btn-lg" disabled>
+                  Modo observación · Inspecciona {activeTeam?.name.split('(')[0].trim()}
+                </button>
+              ) : !isAnswered ? (
                 <button
                   type="button"
                   className="btn-primary btn-lg"

@@ -3,6 +3,10 @@ import {
   GameRoomState,
   INITIAL_QUESTION_BANK,
   ServerToClientMessage,
+  advanceTurnServerSide,
+  canPlayerActOnTeamTurn,
+  createInitialRoomState,
+  joinPlayerToState,
 } from '@prl-oca/shared';
 import workerEntry, { GameRoom } from '../apps/realtime/src/index';
 import {
@@ -607,5 +611,112 @@ describe('ROLL_DICE en Producción: CORS /action, WebSocket, Fallback HTTP, Idem
       actionLabel: 'enviar el lanzamiento de dados',
     });
     expect(timeoutMsg).toContain('Timeout');
+  });
+
+  it('PRUEBA 13: Bloqueo estricto de turno en cliente y servidor — un alumno fuera de turno no puede lanzar el dado ni mover la ficha de otro alumno', async () => {
+    vi.useFakeTimers();
+    const harness = createProdWorkerHarness();
+    const { room, teacherSock, students } = await setupPlayingMatch(harness, 2, 2);
+
+    const startedState = teacherSock.messagesOfType('GAME_STARTED')[0]!.state;
+    const activeTeamId = startedState.teams[startedState.activeTeamIndex].id;
+    const outOfTurnStu = students.find(
+      (s) => startedState.players.find((p) => p.id === s.playerId)?.teamId !== activeTeamId
+    )!;
+    const activeStu = students.find((s) => s.playerId !== outOfTurnStu.playerId)!;
+
+    // 1. Validar helper compartido canPlayerActOnTeamTurn
+    expect(canPlayerActOnTeamTurn(startedState, activeStu.playerId).allowed).toBe(true);
+    const outCheck = canPlayerActOnTeamTurn(startedState, outOfTurnStu.playerId);
+    expect(outCheck.allowed).toBe(false);
+    expect(outCheck.errorCode).toBe('NOT_YOUR_TURN');
+
+    // 2. Simular en useGameStore que el alumno fuera de turno intenta rollDice (ni anima ni llama al servidor)
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    try {
+      useGameStore.setState({
+        screen: 'game',
+        isRemoteSession: true,
+        connectionStatus: 'disconnected',
+        playerId: outOfTurnStu.playerId,
+        playerToken: outOfTurnStu.playerToken,
+        isTeacher: false,
+        isSpectator: false,
+        roomState: structuredClone(startedState),
+        isRollingAnimation: false,
+        isTokenMoving: false,
+        errorMessage: null,
+      });
+
+      useGameStore.getState().rollDice();
+      await vi.advanceTimersByTimeAsync(1300);
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(useGameStore.getState().isRollingAnimation).toBe(false);
+      expect(useGameStore.getState().errorMessage).toContain('Es el turno del');
+      // La posición de ambos equipos sigue exactamente en 1
+      expect(useGameStore.getState().roomState?.teams[0].position).toBe(1);
+      expect(useGameStore.getState().roomState?.teams[1].position).toBe(1);
+
+      // 3. También en modo local (sin sesión remota) nunca sustituye playerId por el del otro alumno
+      useGameStore.setState({
+        isRemoteSession: false,
+        roomState: structuredClone(startedState),
+        isRollingAnimation: false,
+        isTokenMoving: false,
+        errorMessage: null,
+      });
+      useGameStore.getState().rollDice();
+      await vi.advanceTimersByTimeAsync(1300);
+      expect(useGameStore.getState().roomState?.teams[0].position).toBe(1);
+      expect(useGameStore.getState().roomState?.teams[1].position).toBe(1);
+      expect(useGameStore.getState().errorMessage).toContain('Es el turno del');
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+
+    // 4. Alumno fuera de turno también es rechazado por servidor (HTTP 409 NOT_YOUR_TURN) y no mueve ninguna ficha
+    const outHttp = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Player-Token': outOfTurnStu.playerToken,
+        'X-Player-Id': outOfTurnStu.playerId,
+      },
+      body: JSON.stringify({
+        playerId: outOfTurnStu.playerId,
+        playerToken: outOfTurnStu.playerToken,
+        message: {
+          type: 'ROLL_DICE',
+          actionId: 'out_stu_roll_blocked',
+          playerId: outOfTurnStu.playerId,
+          playerToken: outOfTurnStu.playerToken,
+        },
+      }),
+    });
+    expect(outHttp.status).toBe(409);
+    expect(((await outHttp.json()) as { error: string }).error).toBe('NOT_YOUR_TURN');
+    const statePoll = (await (await harness.httpFetch(`/api/rooms/${room.roomCode}`)).json()) as {
+      state: GameRoomState;
+    };
+    expect(statePoll.state.teams[0].position).toBe(1);
+    expect(statePoll.state.teams[1].position).toBe(1);
+
+    // 5. Modo individual con 2 alumnos: advanceTurnServerSide salta slots vacíos (team_3..team_15)
+    const indState = createInitialRoomState('INDV01', {
+      mode: 'individual',
+      maxPlayers: 15,
+    });
+    joinPlayerToState(indState, { playerId: 'ind_1', playerName: 'Luis', preferredTeamId: 'team_1' });
+    joinPlayerToState(indState, { playerId: 'ind_2', playerName: 'Marta', preferredTeamId: 'team_2' });
+    indState.status = 'playing';
+    expect(indState.activeTeamIndex).toBe(0);
+    advanceTurnServerSide(indState);
+    expect(indState.activeTeamIndex).toBe(1);
+    advanceTurnServerSide(indState);
+    expect(indState.activeTeamIndex).toBe(0);
+    expect(indState.turnNumber).toBe(2);
   });
 });

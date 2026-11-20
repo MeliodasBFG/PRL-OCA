@@ -1012,6 +1012,15 @@ textarea {
   font-size: 0.78rem;
   font-weight: 700;
 }
+.btn-roll-dice-3d:disabled,
+.btn-roll-dice-3d.turn-locked {
+  opacity: 0.72;
+  cursor: not-allowed;
+  background: linear-gradient(135deg, #334155 0%, #1e293b 100%);
+  color: #cbd5e1;
+  border-color: #475569;
+  filter: none;
+}
 
 .special-tile-feedback-card {
   position: absolute;

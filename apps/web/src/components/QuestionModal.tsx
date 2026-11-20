@@ -17,6 +17,7 @@ import {
   BOARD_TILES,
   PRL_CATEGORY_LABELS,
   TEAM_ROLE_INFO,
+  canPlayerActOnTeamTurn,
 } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 import { soundEngine } from '../audio/SoundEngine';
@@ -35,6 +36,7 @@ const QUESTION_TYPE_LABELS: Record<string, string> = {
 export const QuestionModal: React.FC = () => {
   const {
     roomState,
+    playerId,
     isRollingAnimation,
     isTokenMoving,
     challengeModalReady,
@@ -51,6 +53,7 @@ export const QuestionModal: React.FC = () => {
   const question = activeChallenge?.kind === 'question' ? activeChallenge.question : undefined;
   const activeTeam = roomState?.teams[roomState.activeTeamIndex ?? 0];
   const tile = BOARD_TILES.find((t) => t.index === activeChallenge?.tileIndex);
+  const isMyTurn = roomState ? canPlayerActOnTeamTurn(roomState, playerId).allowed : false;
 
   const isModalVisible = Boolean(
     roomState &&
@@ -99,8 +102,10 @@ export const QuestionModal: React.FC = () => {
       if (remaining === 0) {
         soundEngine.playSfx('time_up');
         clearInterval(timer);
-        // Auto-resolve on timeout so the player isn't stuck at 0s and sees the pedagogical explanation
-        submitAnswer([-1], false);
+        // Only the active turn's player/teacher submits the timeout resolution
+        if (isMyTurn) {
+          submitAnswer([-1], false);
+        }
       }
     }, 1000);
 
@@ -111,6 +116,7 @@ export const QuestionModal: React.FC = () => {
     activeChallenge?.answered,
     activeChallenge?.expiresAt,
     roomState?.status,
+    isMyTurn,
     submitAnswer,
   ]);
 
@@ -122,7 +128,7 @@ export const QuestionModal: React.FC = () => {
   const isCorrect = Boolean(activeChallenge.isCorrect);
 
   const handleToggleOption = (idx: number) => {
-    if (isAnswered) return;
+    if (isAnswered || !isMyTurn) return;
     soundEngine.playSfx('button_click');
     if (question.type === 'epi_select') {
       setSelected((prev) =>
@@ -134,7 +140,7 @@ export const QuestionModal: React.FC = () => {
   };
 
   const moveOrderItem = (pos: number, dir: -1 | 1) => {
-    if (isAnswered) return;
+    if (isAnswered || !isMyTurn) return;
     const target = pos + dir;
     if (target < 0 || target >= orderSequence.length) return;
     soundEngine.playSfx('button_click');
@@ -146,7 +152,7 @@ export const QuestionModal: React.FC = () => {
   };
 
   const handleConfirm = () => {
-    if (isAnswered) return;
+    if (isAnswered || !isMyTurn) return;
     if (question.type === 'ordering') {
       submitAnswer(orderSequence, collaborated);
     } else {
@@ -278,7 +284,7 @@ export const QuestionModal: React.FC = () => {
                   <button
                     key={idx}
                     type="button"
-                    disabled={isAnswered}
+                    disabled={isAnswered || !isMyTurn}
                     onClick={() => handleToggleOption(idx)}
                     className={`q-option-btn ${statusClass}`}
                   >
@@ -395,7 +401,11 @@ export const QuestionModal: React.FC = () => {
 
         {/* Pie de acciones siempre visible */}
         <div className="q-footer-bar">
-          {!isAnswered ? (
+          {!isMyTurn ? (
+            <button type="button" className="btn-secondary btn-lg" disabled>
+              Modo observación · Responde {activeTeam?.name.split('(')[0].trim()}
+            </button>
+          ) : !isAnswered ? (
             <button
               type="button"
               className="btn-primary btn-lg"
