@@ -185,7 +185,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('SUBMIT_ANSWER'),
     actionId: z.string().min(1).max(64),
     playerId: z.string().min(1).max(64),
-    selectedIndices: z.array(z.number().int().min(0).max(10)).min(1),
+    selectedIndices: z.array(z.number().int().min(-1).max(10)).min(1),
     collaborated: z.boolean().optional(),
     playerToken: z.string().optional(),
   }),

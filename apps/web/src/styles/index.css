@@ -2810,6 +2810,102 @@ textarea {
   cursor: pointer;
 }
 
+.goal-celebration-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 44;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 84px 16px 16px;
+  overflow: hidden;
+}
+
+.goal-confetti-rain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.goal-confetti-spark {
+  position: absolute;
+  top: -16px;
+  width: 10px;
+  height: 18px;
+  border-radius: 3px;
+  animation: goalSparkFall 2.2s cubic-bezier(0.2, 0.7, 0.3, 1) infinite;
+}
+
+.goal-celebration-banner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, 100%);
+  padding: 12px 18px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 2px solid var(--safety-yellow);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.72), 0 0 24px rgba(16, 185, 129, 0.38);
+  color: #f8fafc;
+}
+
+.goal-celebration-banner strong {
+  display: block;
+  font-size: 0.94rem;
+  color: var(--safety-yellow);
+}
+
+.goal-celebration-banner span {
+  display: block;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+  line-height: 1.35;
+}
+
+.standing-meta-badge {
+  background: rgba(16, 185, 129, 0.2);
+  border: 1px solid #10b981;
+  color: #6ee7b7;
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+@keyframes goalSparkFall {
+  0% {
+    transform: translateY(0) rotate(0deg) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(85vh) rotate(540deg) scale(0.7);
+    opacity: 0;
+  }
+}
+
+@media (max-width: 640px), (max-height: 540px) {
+  .goal-celebration-overlay {
+    padding: 58px 10px 10px;
+  }
+
+  .goal-celebration-banner {
+    padding: 9px 12px;
+    gap: 8px;
+  }
+
+  .goal-celebration-banner strong {
+    font-size: 0.82rem;
+  }
+
+  .goal-celebration-banner span {
+    font-size: 0.72rem;
+  }
+}
+
 /* Refinamientos específicos para pantallas móviles en vertical */
 @media (max-width: 640px) {
   .top-header-bar {

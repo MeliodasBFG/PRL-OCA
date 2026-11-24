@@ -25,6 +25,7 @@ interface BoardScene3DProps {
   cameraZoomDelta?: number;
   graphicsQuality: GraphicsQuality;
   reducedMotion?: boolean;
+  celebratingGoal?: boolean;
   hideHtmlOverlays?: boolean;
   onSelectTile?: (tile: TileDefinition) => void;
   onActiveTokenArrive?: () => void;
@@ -147,6 +148,7 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
   cameraZoomDelta = 0,
   graphicsQuality,
   reducedMotion = false,
+  celebratingGoal = false,
   hideHtmlOverlays = false,
   onSelectTile,
   onActiveTokenArrive,
@@ -230,6 +232,7 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
               tile={tile}
               isOccupied={isOccupied}
               isActiveTile={isActiveTile}
+              celebratingGoal={celebratingGoal && tile.index === 48}
               hideHtmlOverlays={hideHtmlOverlays}
               onSelectTile={onSelectTile}
             />
@@ -244,6 +247,7 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
             totalTeams={teams.length}
             isActiveTurn={idx === activeTeamIndex}
             reducedMotion={reducedMotion}
+            celebratingGoal={celebratingGoal && team.position === 48}
             hideHtmlOverlays={hideHtmlOverlays}
             onActiveTokenProgress={idx === activeTeamIndex ? handleTokenProgress : undefined}
             onActiveTokenArrive={idx === activeTeamIndex ? onActiveTokenArrive : undefined}
@@ -251,6 +255,21 @@ export const BoardScene3D: React.FC<BoardScene3DProps> = ({
         ))}
 
         <Dice3D diceValues={diceValues} isRolling={isRolling} position={[1.5, 2.32, 5.5]} />
+
+        {celebratingGoal && !reducedMotion && (
+          <Sparkles
+            count={95}
+            scale={[5.5, 5.0, 5.5]}
+            position={[
+              BOARD_TILES[47].position[0],
+              BOARD_TILES[47].position[1] + 2.4,
+              BOARD_TILES[47].position[2],
+            ]}
+            size={4.4}
+            speed={2.1}
+            color="#34D399"
+          />
+        )}
 
         {graphicsQuality !== 'baja' && !reducedMotion && (
           <Sparkles

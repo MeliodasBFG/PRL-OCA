@@ -226,6 +226,18 @@ export interface Team {
   skipNextTurn: boolean;
   roleRotationOffset: number;
   currentRoles: RoleAssignment[];
+  finishOrder?: number;
+  finishedAt?: number;
+}
+
+export interface GoalCelebrationEvent {
+  teamId: string;
+  teamName: string;
+  teamColor: string;
+  playerName: string;
+  finishOrder: number;
+  allFinished: boolean;
+  timestamp: number;
 }
 
 export interface GameConfig {
@@ -328,6 +340,8 @@ export interface GameRoomState {
   lastDiceRoll: DiceRollResult | null;
   activeChallenge: ActiveTurnChallenge | null;
   winnerTeamId: string | null;
+  finishedTeamIds?: string[];
+  lastGoalCelebration?: GoalCelebrationEvent | null;
   categoryStats: Record<PRLCategory, CategoryStat>;
   logs: GameLogEvent[];
   usedQuestionIds: string[];
@@ -356,6 +370,7 @@ export interface MatchHistoryRecord {
     correctAnswers: number;
     wrongAnswers: number;
     badges: BadgeId[];
+    finishOrder?: number;
   }>;
   masteredCategories: PRLCategory[];
   reinforceCategories: PRLCategory[];

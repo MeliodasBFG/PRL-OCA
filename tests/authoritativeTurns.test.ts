@@ -1000,4 +1000,175 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
       isConnSpy.mockRestore();
     }
   });
+
+  it('PRUEBA 15: Partida continúa hasta que todos los participantes alcanzan la Meta (#48), omite turnos de finalistas y celebra cada llegada', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+    const stu = students[0];
+
+    // Mover ambos equipos cerca de la meta (#47)
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'TEACHER_ACTION',
+      actionId: 'p15_move_t1',
+      teacherToken: room.teacherToken,
+      command: { kind: 'MOVE_TEAM', teamId: 'team_1', targetTile: 47 },
+    });
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'TEACHER_ACTION',
+      actionId: 'p15_move_t2',
+      teacherToken: room.teacherToken,
+      command: { kind: 'MOVE_TEAM', teamId: 'team_2', targetTile: 47 },
+    });
+
+    // 1. Profesor (team_1) saca 1 -> llega a Casilla #48 y acierta pregunta final
+    const dieSpy = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation((arr) => {
+      (arr as Uint32Array)[0] = 0; // (0 % 6) + 1 = 1 -> 47 + 1 = 48
+      return arr;
+    });
+    try {
+      const r1 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify({
+          type: 'ROLL_DICE',
+          actionId: 'p15_t1_roll48',
+          playerId: room.playerId,
+          playerToken: room.playerToken,
+        }),
+      });
+      expect(r1.status).toBe(200);
+      const j1 = (await r1.json()) as { state: GameRoomState };
+      expect(j1.state.teams[0].position).toBe(48);
+      const q1 = j1.state.activeChallenge!.question!;
+
+      const a1 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify({
+          type: 'SUBMIT_ANSWER',
+          actionId: 'p15_t1_ans48',
+          playerId: room.playerId,
+          selectedIndices: q1.correctIndices,
+          collaborated: true,
+          playerToken: room.playerToken,
+        }),
+      });
+      expect(a1.status).toBe(200);
+      const ansJson1 = (await a1.json()) as { state: GameRoomState };
+      // Crítico: team_1 llegó en #1, pero Alumno 1 aún no ha llegado -> partida sigue PLAYING
+      expect(ansJson1.state.status).toBe('playing');
+      expect(ansJson1.state.phase).toBe('showing_feedback');
+      expect(ansJson1.state.teams[0].finishOrder).toBe(1);
+      expect(ansJson1.state.finishedTeamIds).toEqual(['team_1']);
+      expect(ansJson1.state.lastGoalCelebration?.finishOrder).toBe(1);
+      expect(ansJson1.state.lastGoalCelebration?.allFinished).toBe(false);
+
+      // Avanzar turno -> pasa a Alumno 1 (team_2)
+      const n1 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify({
+          type: 'NEXT_TURN',
+          actionId: 'p15_t1_next',
+          playerId: room.playerId,
+          playerToken: room.playerToken,
+        }),
+      });
+      expect(n1.status).toBe(200);
+      const nextJson1 = (await n1.json()) as { state: GameRoomState };
+      expect(nextJson1.state.activePlayerId).toBe(stu.playerId);
+
+      // 2. Alumno 1 (team_2) saca 1 -> llega a Casilla #48, FALLA una vez -> retrocede a #46 y el turno omite a team_1 (ya finalista)
+      const r2 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': stu.playerToken },
+        body: JSON.stringify({
+          type: 'ROLL_DICE',
+          actionId: 'p15_s1_roll48_fail',
+          playerId: stu.playerId,
+          playerToken: stu.playerToken,
+        }),
+      });
+      expect(r2.status).toBe(200);
+      const q2 = ((await r2.json()) as { state: GameRoomState }).state.activeChallenge!.question!;
+      const nonCorrectIdx = q2.options.findIndex((_, i) => !q2.correctIndices.includes(i));
+      const wrongSelection = nonCorrectIdx >= 0 ? [nonCorrectIdx] : [-1];
+      const a2Wrong = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': stu.playerToken },
+        body: JSON.stringify({
+          type: 'SUBMIT_ANSWER',
+          actionId: 'p15_s1_wrong48',
+          playerId: stu.playerId,
+          selectedIndices: wrongSelection,
+          collaborated: false,
+          playerToken: stu.playerToken,
+        }),
+      });
+      expect(a2Wrong.status).toBe(200);
+      const wrongState = ((await a2Wrong.json()) as { state: GameRoomState }).state;
+      expect(wrongState.teams[1].position).toBe(46);
+      expect(wrongState.status).toBe('playing');
+
+      const n2 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': stu.playerToken },
+        body: JSON.stringify({
+          type: 'NEXT_TURN',
+          actionId: 'p15_s1_next_after_fail',
+          playerId: stu.playerId,
+          playerToken: stu.playerToken,
+        }),
+      });
+      expect(n2.status).toBe(200);
+      const skipFinishedState = ((await n2.json()) as { state: GameRoomState }).state;
+      // Crítico: team_1 ya terminó (#48), el turno vuelve directamente a Alumno 1
+      expect(skipFinishedState.activePlayerId).toBe(stu.playerId);
+
+      // 3. Alumno 1 avanza 2 (46 -> 48) y acierta -> AHORA SÍ termina para todos (finished, allFinished=true)
+      dieSpy.mockImplementation((arr) => {
+        (arr as Uint32Array)[0] = 1; // (1 % 6) + 1 = 2 -> 46 + 2 = 48
+        return arr;
+      });
+      const r3 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': stu.playerToken },
+        body: JSON.stringify({
+          type: 'ROLL_DICE',
+          actionId: 'p15_s1_roll48_win',
+          playerId: stu.playerId,
+          playerToken: stu.playerToken,
+        }),
+      });
+      expect(r3.status).toBe(200);
+      const q3 = ((await r3.json()) as { state: GameRoomState }).state.activeChallenge!.question!;
+      const a3 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': stu.playerToken },
+        body: JSON.stringify({
+          type: 'SUBMIT_ANSWER',
+          actionId: 'p15_s1_ans48_win',
+          playerId: stu.playerId,
+          selectedIndices: q3.correctIndices,
+          collaborated: false,
+          playerToken: stu.playerToken,
+        }),
+      });
+      expect(a3.status).toBe(200);
+      const finalState = ((await a3.json()) as { state: GameRoomState }).state;
+      expect(finalState.status).toBe('finished');
+      expect(finalState.phase).toBe('finished');
+      expect(finalState.finishedTeamIds).toEqual(['team_1', 'team_2']);
+      expect(finalState.teams[0].finishOrder).toBe(1);
+      expect(finalState.teams[1].finishOrder).toBe(2);
+      expect(finalState.lastGoalCelebration?.finishOrder).toBe(2);
+      expect(finalState.lastGoalCelebration?.allFinished).toBe(true);
+    } finally {
+      dieSpy.mockRestore();
+    }
+  });
 });

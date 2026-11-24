@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Sparkles } from '@react-three/drei';
 import {
@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   Download,
   Home,
-  RotateCcw,
   ShieldAlert,
   Trophy,
 } from 'lucide-react';
@@ -17,11 +16,17 @@ import {
   buildMatchHistoryFromState,
 } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
+import { soundEngine } from '../audio/SoundEngine';
 import { Mascot3D } from '../scenes/Mascot3D';
 import { Badge3D } from '../characters/Badge3D';
 
 export const VictoryScreen: React.FC = () => {
   const { roomState, leaveRoom, setScreen } = useGameStore();
+
+  useEffect(() => {
+    soundEngine.playSfx('goal_reached');
+    soundEngine.playMusic('victory');
+  }, []);
 
   if (!roomState) return null;
 
@@ -136,7 +141,10 @@ export const VictoryScreen: React.FC = () => {
                 className="podium-team-card"
                 style={{ borderTop: `5px solid ${team.color}` }}
               >
-                <div className="podium-rank-num">#{idx + 1}</div>
+                <div className="podium-rank-num">
+                  #{team.finishOrder ?? idx + 1}{' '}
+                  {team.position === 48 ? '· 🏁 Meta #48' : ''}
+                </div>
                 <h3>{team.name}</h3>
                 <div className="podium-score-big">{team.score} pts</div>
                 <p>

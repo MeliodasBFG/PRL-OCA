@@ -211,6 +211,8 @@ export function createInitialRoomState(
     lastDiceRoll: null,
     activeChallenge: null,
     winnerTeamId: null,
+    finishedTeamIds: [],
+    lastGoalCelebration: null,
     categoryStats: createInitialCategoryStats(),
     logs: [
       createLog(
@@ -549,6 +551,56 @@ export function secureRandomDie(): number {
   return Math.floor(Math.random() * 6) + 1;
 }
 
+export function isTeamFinished(team: Team | undefined, state?: GameRoomState): boolean {
+  if (!team) return false;
+  return Boolean(
+    team.finishOrder !== undefined ||
+      team.finishedAt !== undefined ||
+      state?.finishedTeamIds?.includes(team.id)
+  );
+}
+
+export function sortTeamsByStanding(teams: Team[], finishedTeamIds?: string[]): Team[] {
+  return [...teams].sort((a, b) => {
+    const aOrder =
+      a.finishOrder ??
+      (finishedTeamIds && finishedTeamIds.indexOf(a.id) >= 0
+        ? finishedTeamIds.indexOf(a.id) + 1
+        : Number.POSITIVE_INFINITY);
+    const bOrder =
+      b.finishOrder ??
+      (finishedTeamIds && finishedTeamIds.indexOf(b.id) >= 0
+        ? finishedTeamIds.indexOf(b.id) + 1
+        : Number.POSITIVE_INFINITY);
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    if (b.position !== a.position) return b.position - a.position;
+    return b.score - a.score;
+  });
+}
+
+export function getOccupiedParticipantTeams(state: GameRoomState): Team[] {
+  return state.teams.filter((t) =>
+    state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
+  );
+}
+
+export function finalizeGameIfAllTeamsFinished(state: GameRoomState): boolean {
+  const occupiedTeams = getOccupiedParticipantTeams(state);
+  if (
+    state.status === 'playing' &&
+    occupiedTeams.length > 0 &&
+    occupiedTeams.every((t) => isTeamFinished(t, state))
+  ) {
+    const ordered = sortTeamsByStanding(occupiedTeams, state.finishedTeamIds);
+    state.winnerTeamId = state.finishedTeamIds?.[0] ?? ordered[0]?.id ?? state.winnerTeamId ?? null;
+    state.status = 'finished';
+    state.phase = 'finished';
+    state.activePlayerId = null;
+    return true;
+  }
+  return false;
+}
+
 export function resolveActivePlayerForTeam(
   state: GameRoomState,
   team: Team | undefined
@@ -563,9 +615,16 @@ export function resolveActivePlayerForTeam(
 }
 
 export function syncActivePlayerTurn(state: GameRoomState): void {
+  if (finalizeGameIfAllTeamsFinished(state)) {
+    return;
+  }
   const activeTeam = state.teams[state.activeTeamIndex];
   if (!activeTeam) {
     state.activePlayerId = null;
+    return;
+  }
+  if (isTeamFinished(activeTeam, state) && state.status === 'playing' && state.phase === 'waiting_roll') {
+    advanceTurnServerSide(state);
     return;
   }
   const currentOwnerStillValid = Boolean(
@@ -660,6 +719,16 @@ export function canPlayerActOnTeamTurn(
         : `No es tu turno. Es el turno del ${activeTeam.name}.`,
       activeTeam,
       activePlayerId: expectedPlayerId,
+      player,
+    };
+  }
+
+  if (isTeamFinished(activeTeam, state) && state.phase === 'waiting_roll') {
+    return {
+      allowed: false,
+      errorCode: 'NOT_YOUR_TURN',
+      reason: `${activeTeam.name} ya ha completado el recorrido hasta la Meta (#48).`,
+      activeTeam,
       player,
     };
   }
@@ -925,6 +994,7 @@ export function submitAnswerServerSide(
   const giveCollabBonus = collaborated && teamMembersCount > 1;
 
   let retreatTiles = 0;
+  let matchCompletedNow = false;
 
   if (isCorrect) {
     pointsAwarded = q.points + (giveCollabBonus ? state.config.scoring.colaboracionBonus : 0);
@@ -953,15 +1023,38 @@ export function submitAnswerServerSide(
       );
     }
 
-    // Check if team answered on Meta Tile 48 -> Victory!
+    // Check if team answered on Meta Tile 48 -> celebrate goal arrival & finish when ALL occupied teams reach #48!
     if (activeTeam.position === 48) {
-      state.winnerTeamId = activeTeam.id;
-      state.status = 'finished';
-      state.phase = 'finished';
+      const now = Date.now();
+      if (!state.finishedTeamIds) {
+        state.finishedTeamIds = [];
+      }
+      if (!state.finishedTeamIds.includes(activeTeam.id)) {
+        state.finishedTeamIds.push(activeTeam.id);
+      }
+      const finishOrder = state.finishedTeamIds.indexOf(activeTeam.id) + 1;
+      activeTeam.finishOrder = activeTeam.finishOrder ?? finishOrder;
+      activeTeam.finishedAt = activeTeam.finishedAt ?? now;
+      state.winnerTeamId = state.winnerTeamId ?? state.finishedTeamIds[0] ?? activeTeam.id;
+
+      const allFinished = finalizeGameIfAllTeamsFinished(state);
+      matchCompletedNow = allFinished;
+      state.lastGoalCelebration = {
+        teamId: activeTeam.id,
+        teamName: activeTeam.name,
+        teamColor: activeTeam.hexColor,
+        playerName: turnAuth.player.name,
+        finishOrder: activeTeam.finishOrder,
+        allFinished,
+        timestamp: now,
+      };
+
       state.logs.unshift(
         createLog(
           'system',
-          `🏆 ¡VICTORIA PREVENTIVA! ${activeTeam.name} ha alcanzado la Meta Cero Accidentes con ${activeTeam.score} puntos.`,
+          allFinished
+            ? `🏆 ¡VICTORIA PREVENTIVA COMPLETA! ${activeTeam.name} alcanza la Meta Cero Accidentes (#${activeTeam.finishOrder}) y todos los participantes han llegado al final del tablero.`
+            : `🏁 ¡META ALCANZADA! ${activeTeam.name} llega a la casilla #48 (Puesto #${activeTeam.finishOrder}) con ${activeTeam.score} puntos. La partida continúa para los demás participantes.`,
           activeTeam.id
         )
       );
@@ -1004,7 +1097,7 @@ export function submitAnswerServerSide(
   state.activeChallenge.collaborationBonusAwarded = isCorrect && giveCollabBonus;
   state.activeChallenge.unlockedBadges = unlockedBadges;
 
-  if (state.status !== 'finished') {
+  if (!matchCompletedNow) {
     state.phase = 'showing_feedback';
   }
   state.updatedAt = Date.now();
@@ -1069,6 +1162,7 @@ export function completeChallenge3DServerSide(
   let unlockedBadges: BadgeId[] = [];
 
   let retreatTiles = 0;
+  let matchCompletedNow = false;
 
   if (isCorrect) {
     pointsAwarded = challenge.points + state.config.scoring.colaboracionBonus;
@@ -1122,13 +1216,17 @@ export function completeChallenge3DServerSide(
 
 export function advanceTurnServerSide(state: GameRoomState): void {
   if (state.status === 'finished') return;
+  if (finalizeGameIfAllTeamsFinished(state)) {
+    state.updatedAt = Date.now();
+    return;
+  }
 
   const currentTeam = state.teams[state.activeTeamIndex];
   const landedTileIndex = state.lastDiceRoll?.toTile;
   const landedTile = BOARD_TILES.find((t) => t.index === landedTileIndex);
 
-  // Check if current team earned an extra roll from an Oca Preventiva
-  const hasExtraRoll = Boolean(landedTile?.specialEffect?.extraRoll);
+  // Check if current team earned an extra roll from an Oca Preventiva (only if still active, not finished at #48)
+  const hasExtraRoll = Boolean(landedTile?.specialEffect?.extraRoll) && !isTeamFinished(currentTeam, state);
 
   if (hasExtraRoll && currentTeam) {
     refreshAllTeamRoles(state);
@@ -1159,30 +1257,35 @@ export function advanceTurnServerSide(state: GameRoomState): void {
     currentTeam.roleRotationOffset += 1;
   }
 
-  // Move to next active team (skip empty teams when at least 2 teams have participants, or in individual mode)
+  // Move to next unfinished active team (skip finished teams and empty slots when >=2 occupied or individual)
   const teamCount = state.teams.length;
-  const occupiedTeamsCount = state.teams.filter((t) =>
-    state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
-  ).length;
+  const occupiedTeamsCount = getOccupiedParticipantTeams(state).length;
   const shouldSkipEmptyTeams = state.config.mode === 'individual' || occupiedTeamsCount >= 2;
 
   let nextIdx = (state.activeTeamIndex + 1) % teamCount;
   if (nextIdx === 0) {
     state.turnNumber += 1;
   }
-  if (shouldSkipEmptyTeams && occupiedTeamsCount > 0) {
-    for (let step = 0; step < teamCount; step++) {
-      const candidate = state.teams[nextIdx];
-      const occupied = Boolean(
-        candidate &&
-          state.players.some((p) => p.teamId === candidate.id && isPlayerCountedAsParticipant(p))
-      );
-      if (occupied) break;
-      nextIdx = (nextIdx + 1) % teamCount;
-      if (nextIdx === 0) {
-        state.turnNumber += 1;
-      }
+  let foundCandidate = false;
+  for (let step = 0; step < teamCount; step++) {
+    const candidate = state.teams[nextIdx];
+    const occupied = Boolean(
+      candidate &&
+        state.players.some((p) => p.teamId === candidate.id && isPlayerCountedAsParticipant(p))
+    );
+    const unfinished = !isTeamFinished(candidate, state);
+    if (unfinished && (!shouldSkipEmptyTeams || occupied || occupiedTeamsCount === 0)) {
+      foundCandidate = true;
+      break;
     }
+    nextIdx = (nextIdx + 1) % teamCount;
+    if (nextIdx === 0) {
+      state.turnNumber += 1;
+    }
+  }
+  if (!foundCandidate && finalizeGameIfAllTeamsFinished(state)) {
+    state.updatedAt = Date.now();
+    return;
   }
   state.activeTeamIndex = nextIdx;
 
@@ -1209,10 +1312,7 @@ export function advanceTurnServerSide(state: GameRoomState): void {
 }
 
 export function buildMatchHistoryFromState(state: GameRoomState): MatchHistoryRecord {
-  const sortedTeams = [...state.teams].sort((a, b) => {
-    if (b.position !== a.position) return b.position - a.position;
-    return b.score - a.score;
-  });
+  const sortedTeams = sortTeamsByStanding(state.teams, state.finishedTeamIds);
   const winner =
     state.teams.find((t) => t.id === state.winnerTeamId) ?? sortedTeams[0] ?? state.teams[0];
 
@@ -1257,6 +1357,7 @@ export function buildMatchHistoryFromState(state: GameRoomState): MatchHistoryRe
       correctAnswers: t.correctAnswers,
       wrongAnswers: t.wrongAnswers,
       badges: t.badges,
+      finishOrder: t.finishOrder,
     })),
     masteredCategories,
     reinforceCategories,

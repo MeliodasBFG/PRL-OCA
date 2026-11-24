@@ -4,6 +4,7 @@ import {
   ClientToServerMessage,
   GameConfig,
   GameRoomState,
+  GoalCelebrationEvent,
   GraphicsQuality,
   INITIAL_QUESTION_BANK,
   MatchHistoryRecord,
@@ -52,11 +53,23 @@ const PREFS_STORAGE_KEY = 'prl_oca_visual_prefs_v1';
 let walkFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 let arrivalRevealTimer: ReturnType<typeof setTimeout> | null = null;
 let wsActionFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+let goalCelebrationTimer: ReturnType<typeof setTimeout> | null = null;
+let lastCelebratedGoalTs = 0;
+let lastArrivalCelebratedRollTs = 0;
 
 function clearPendingWsActionFallback(): void {
   if (wsActionFallbackTimer) {
     clearTimeout(wsActionFallbackTimer);
     wsActionFallbackTimer = null;
+  }
+}
+
+function resetGoalCelebrationCounters(): void {
+  lastCelebratedGoalTs = 0;
+  lastArrivalCelebratedRollTs = 0;
+  if (goalCelebrationTimer) {
+    clearTimeout(goalCelebrationTimer);
+    goalCelebrationTimer = null;
   }
 }
 
@@ -244,6 +257,7 @@ export interface GameStore {
   isRollingAnimation: boolean;
   isTokenMoving: boolean;
   challengeModalReady: boolean;
+  goalCelebration: GoalCelebrationEvent | null;
 
   // Modals
   showQRModal: boolean;
@@ -539,8 +553,77 @@ export const useGameStore = create<GameStore>((set, get) => {
     return false;
   };
 
+  const triggerGoalCelebrationFx = (event: GoalCelebrationEvent) => {
+    if (event.timestamp <= lastCelebratedGoalTs) return;
+    lastCelebratedGoalTs = event.timestamp;
+    if (goalCelebrationTimer) {
+      clearTimeout(goalCelebrationTimer);
+    }
+    soundEngine.playSfx('goal_reached');
+    if (event.allFinished) {
+      setTimeout(() => soundEngine.playSfx('victory_fanfare'), 380);
+      soundEngine.playMusic('victory');
+    }
+    set({ goalCelebration: event });
+    goalCelebrationTimer = setTimeout(() => {
+      goalCelebrationTimer = null;
+      set((s) => (s.goalCelebration?.timestamp === event.timestamp ? { goalCelebration: null } : s));
+    }, 4200);
+  };
+
+  const triggerGoalTile48Arrival = (room: GameRoomState) => {
+    const activeTeam = room.teams[room.activeTeamIndex];
+    const rollTs = room.lastDiceRoll?.timestamp ?? Date.now();
+    if (!activeTeam || activeTeam.position !== 48 || rollTs <= lastArrivalCelebratedRollTs) {
+      return false;
+    }
+    lastArrivalCelebratedRollTs = rollTs;
+    const activePlayer = room.activePlayerId
+      ? room.players.find((p) => p.id === room.activePlayerId)
+      : undefined;
+    const arrivalEvent: GoalCelebrationEvent = {
+      teamId: activeTeam.id,
+      teamName: activeTeam.name,
+      teamColor: activeTeam.hexColor,
+      playerName: activePlayer?.name ?? activeTeam.name,
+      finishOrder: activeTeam.finishOrder ?? 0,
+      allFinished: false,
+      timestamp: Date.now(),
+    };
+    if (goalCelebrationTimer) {
+      clearTimeout(goalCelebrationTimer);
+    }
+    soundEngine.playSfx('goal_reached');
+    set({ goalCelebration: arrivalEvent });
+    goalCelebrationTimer = setTimeout(() => {
+      goalCelebrationTimer = null;
+      set((s) =>
+        s.goalCelebration?.timestamp === arrivalEvent.timestamp ? { goalCelebration: null } : s
+      );
+    }, 3200);
+    return true;
+  };
+
+  const scheduleSoloBotRollIfNeeded = (room: GameRoomState) => {
+    if (get().isRemoteSession || room.status !== 'playing') return;
+    const nextTeam = room.teams[room.activeTeamIndex];
+    const isBotNext = room.players.some(
+      (p) => p.id === 'bot_companero' && p.teamId === nextTeam?.id
+    );
+    if (isBotNext) {
+      setTimeout(() => {
+        if (get().screen === 'game' && get().roomState?.phase === 'waiting_roll') {
+          get().rollDice();
+        }
+      }, 800);
+    }
+  };
+
   const revealChallengeAfterArrival = () => {
     const st = get().roomState;
+    if (st && st.teams[st.activeTeamIndex]?.position === 48) {
+      triggerGoalTile48Arrival(st);
+    }
     const activeTeam = st?.teams[st.activeTeamIndex];
     const isBotTurn = Boolean(
       st &&
@@ -568,7 +651,11 @@ export const useGameStore = create<GameStore>((set, get) => {
           completeChallenge3DServerSide(st, 'bot_companero', correctIds);
         }
       }
-      soundEngine.playSfx('reward');
+      if (st.lastGoalCelebration) {
+        triggerGoalCelebrationFx(st.lastGoalCelebration);
+      } else {
+        soundEngine.playSfx('reward');
+      }
       set({
         roomState: { ...st },
         isTokenMoving: false,
@@ -583,6 +670,18 @@ export const useGameStore = create<GameStore>((set, get) => {
           return;
         }
         advanceTurnServerSide(cur);
+        const advancedState: GameRoomState = cur;
+        if (advancedState.status === 'finished') {
+          soundEngine.playSfx('victory_fanfare');
+          soundEngine.playMusic('victory');
+          set({
+            roomState: { ...advancedState },
+            screen: 'victory',
+            isTokenMoving: false,
+            challengeModalReady: true,
+          });
+          return;
+        }
         set((s) => ({
           roomState: { ...cur },
           cameraView: 'isometric',
@@ -590,6 +689,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           isTokenMoving: false,
           challengeModalReady: true,
         }));
+        scheduleSoloBotRollIfNeeded(cur);
       }, 1100);
       return;
     }
@@ -626,7 +726,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       roll?.toTile ??
       1;
     const startPos = roll?.fromTile ?? 1;
-    const stepsCount = Math.max(1, Math.abs(finalPos - startPos));
+    const stepsCount = Math.abs(finalPos - startPos);
 
     // Pause briefly on dice result (750ms) then switch camera to follow active token
     setTimeout(() => {
@@ -635,10 +735,13 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
     }, 750);
 
-    // Fallback timer in case 2D mode is active or WebGL frame callback doesn't fire
-    const estimatedWalkMs = get().reducedMotion
-      ? 900
-      : stepsCount * 560 + 1400;
+    // Fallback timer in case 2D mode is active, bounce-back landed on same tile, or WebGL callback doesn't fire
+    const estimatedWalkMs =
+      stepsCount === 0
+        ? 750
+        : get().reducedMotion
+        ? 900
+        : stepsCount * 560 + 1400;
     walkFallbackTimer = setTimeout(() => {
       if (get().isTokenMoving || !get().challengeModalReady) {
         revealChallengeAfterArrival();
@@ -751,9 +854,15 @@ export const useGameStore = create<GameStore>((set, get) => {
         soundEngine.playSfx('challenge_start');
         soundEngine.playMusic('board');
       } else if (msg.state.status === 'finished') {
-        soundEngine.playSfx('victory_fanfare');
-        soundEngine.playMusic('victory');
+        if (msg.state.lastGoalCelebration) {
+          triggerGoalCelebrationFx(msg.state.lastGoalCelebration);
+        } else {
+          soundEngine.playSfx('victory_fanfare');
+          soundEngine.playMusic('victory');
+        }
         persistFinishedMatchHistory(msg.state);
+      } else if (msg.state.lastGoalCelebration) {
+        triggerGoalCelebrationFx(msg.state.lastGoalCelebration);
       } else if (hasNewRollFromSync) {
         soundEngine.playSfx('dice_hit');
       }
@@ -825,9 +934,13 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (msg.unlockedBadges.length > 0) {
         setTimeout(() => soundEngine.playSfx('badge_unlock'), 350);
       }
-      if (msg.state.status === 'finished') {
+      if (msg.state.lastGoalCelebration) {
+        triggerGoalCelebrationFx(msg.state.lastGoalCelebration);
+      } else if (msg.state.status === 'finished') {
         soundEngine.playSfx('victory_fanfare');
         soundEngine.playMusic('victory');
+      }
+      if (msg.state.status === 'finished') {
         persistFinishedMatchHistory(msg.state);
       }
       set({
@@ -907,6 +1020,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     isRollingAnimation: false,
     isTokenMoving: false,
     challengeModalReady: true,
+    goalCelebration: null,
 
     showQRModal: false,
     showTeacherPanel: false,
@@ -994,10 +1108,18 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (arrivalRevealTimer) {
         clearTimeout(arrivalRevealTimer);
       }
-      // Pause 850ms on the illuminated landing tile before opening the Question/Challenge card
+      const stNow = get().roomState;
+      const reachedGoalTile = Boolean(
+        stNow && stNow.teams[stNow.activeTeamIndex]?.position === 48
+      );
+      if (reachedGoalTile && stNow) {
+        triggerGoalTile48Arrival(stNow);
+      }
+      // Pause slightly longer on Meta Tile #48 so the arrival animation + fanfare plays visibly before the final question
+      const revealDelayMs = reachedGoalTile && !get().reducedMotion ? 1500 : 850;
       arrivalRevealTimer = setTimeout(() => {
         revealChallengeAfterArrival();
-      }, 850);
+      }, revealDelayMs);
     },
 
     applyServerMessage: (msg) => {
@@ -1176,6 +1298,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         persistSessionPlayerToken(roomCode, serverPlayerToken);
       }
 
+      resetGoalCelebrationCounters();
       set({
         roomState: { ...initialState },
         isRemoteSession: createdOnServer,
@@ -1190,6 +1313,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         errorMessage: null,
         isTokenMoving: false,
         challengeModalReady: true,
+        goalCelebration: null,
       });
 
       mpClient.connect(
@@ -1380,6 +1504,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const targetScreen = deriveScreenFromRoomState(state);
 
+      resetGoalCelebrationCounters();
       set({
         roomState: { ...state },
         isRemoteSession: loadedFromServer,
@@ -1395,6 +1520,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         errorMessage: null,
         isTokenMoving: false,
         challengeModalReady: true,
+        goalCelebration: null,
       });
 
       mpClient.connect(
@@ -1533,6 +1659,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       clearMovementTimers();
       inFlightSlotActions.clear();
       pendingSlotActionIds.clear();
+      resetGoalCelebrationCounters();
       get().markLocalDisconnect();
       mpClient.disconnect();
       soundEngine.playMusic('menu');
@@ -1551,6 +1678,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         isRollingAnimation: false,
         isTokenMoving: false,
         challengeModalReady: true,
+        goalCelebration: null,
       });
     },
 
@@ -1785,10 +1913,15 @@ export const useGameStore = create<GameStore>((set, get) => {
         setTimeout(() => soundEngine.playSfx('badge_unlock'), 400);
       }
       soundEngine.playMusic('board');
+      if (state.lastGoalCelebration) {
+        triggerGoalCelebrationFx(state.lastGoalCelebration);
+      }
 
       if (state.status === 'finished') {
-        soundEngine.playSfx('victory_fanfare');
-        soundEngine.playMusic('victory');
+        if (!state.lastGoalCelebration) {
+          soundEngine.playSfx('victory_fanfare');
+          soundEngine.playMusic('victory');
+        }
         const record = buildMatchHistoryFromState(state);
         const updatedHistory = [record, ...get().matchHistory].slice(0, 50);
         if (typeof window !== 'undefined') {
@@ -1889,6 +2022,20 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       advanceTurnServerSide(state);
+      if (state.status === 'finished') {
+        soundEngine.playSfx('victory_fanfare');
+        soundEngine.playMusic('victory');
+        persistFinishedMatchHistory(state);
+        set({
+          roomState: { ...state },
+          screen: 'victory',
+          cameraView: 'goal',
+          isTokenMoving: false,
+          challengeModalReady: true,
+        });
+        mpClient.broadcastLocalState(state);
+        return;
+      }
       set((s) => ({
         roomState: { ...state },
         cameraView: 'isometric',
@@ -1899,17 +2046,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       mpClient.broadcastLocalState(state);
 
       // If in Solo mode and the next turn belongs to Brigada Preventiva IA, auto-roll after 800ms
-      const nextTeam = state.teams[state.activeTeamIndex];
-      const isBotNext = state.players.some(
-        (p) => p.id === 'bot_companero' && p.teamId === nextTeam?.id
-      );
-      if (isBotNext && state.status === 'playing') {
-        setTimeout(() => {
-          if (get().screen === 'game' && get().roomState?.phase === 'waiting_roll') {
-            get().rollDice();
-          }
-        }, 800);
-      }
+      scheduleSoloBotRollIfNeeded(state);
     },
 
     runTeacherCommand: async (command) => {

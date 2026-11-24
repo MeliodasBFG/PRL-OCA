@@ -24,6 +24,7 @@ interface Tile3DProps {
   tile: TileDefinition;
   isOccupied: boolean;
   isActiveTile: boolean;
+  celebratingGoal?: boolean;
   hideHtmlOverlays?: boolean;
   onSelectTile?: (tile: TileDefinition) => void;
 }
@@ -257,6 +258,7 @@ export const Tile3D: React.FC<Tile3DProps> = ({
   tile,
   isOccupied,
   isActiveTile,
+  celebratingGoal = false,
   hideHtmlOverlays = false,
   onSelectTile,
 }) => {
@@ -301,7 +303,10 @@ export const Tile3D: React.FC<Tile3DProps> = ({
         baseHeight / 2 + 0.42 + Math.sin(t * 2.2 + tile.index * 0.4) * (isActiveTile ? 0.06 : 0.025);
     }
     if (ringRef.current) {
-      const scale = isActiveTile || hovered ? 1.06 + Math.sin(t * 5) * 0.04 : 1;
+      const pulseSpeed = celebratingGoal ? 10 : 5;
+      const pulseAmp = celebratingGoal ? 0.14 : 0.04;
+      const scale =
+        isActiveTile || hovered || celebratingGoal ? 1.06 + Math.sin(t * pulseSpeed) * pulseAmp : 1;
       ringRef.current.scale.set(scale, scale, 1);
     }
   });

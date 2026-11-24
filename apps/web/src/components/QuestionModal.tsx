@@ -353,6 +353,16 @@ export const QuestionModal: React.FC = () => {
                 )}
               </div>
 
+              {activeChallenge.tileIndex === 48 && isCorrect && activeTeam?.finishOrder && (
+                <div className="unlocked-badges-alert">
+                  <Award size={20} />
+                  <span>
+                    🏁 ¡META #48 CONQUISTADA EN EL PUESTO #{activeTeam.finishOrder}! Los demás
+                    participantes continúan hasta completar el recorrido.
+                  </span>
+                </div>
+              )}
+
               {activeChallenge.unlockedBadges && activeChallenge.unlockedBadges.length > 0 && (
                 <div className="unlocked-badges-alert">
                   <Award size={20} />

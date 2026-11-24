@@ -1328,6 +1328,9 @@ export class GameRoom {
           };
         }
         advanceTurnServerSide(state);
+        if (state.status === 'finished') {
+          await db.saveMatchHistory(buildMatchHistoryFromState(state));
+        }
         return finalizeSuccess({ type: 'STATE_SYNC', state });
       }
     }

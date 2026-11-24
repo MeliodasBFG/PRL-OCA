@@ -32,6 +32,7 @@ export type SoundEffectId =
   | 'extinguisher'
   | 'reward'
   | 'badge_unlock'
+  | 'goal_reached'
   | 'victory_fanfare';
 
 export interface AudioSettings {
@@ -63,6 +64,7 @@ const CAPTION_LABELS: Record<SoundEffectId, string> = {
   extinguisher: '🧯 Descarga de extintor CO2',
   reward: '🌟 Recompensa preventiva obtenida',
   badge_unlock: '🏅 ¡Nueva insignia 3D desbloqueada!',
+  goal_reached: '🏁 ¡Llegada a la Meta Final #48! Fanfarria de celebración',
   victory_fanfare: '🏆 ¡Fanfarria de Victoria Cero Accidentes!',
 };
 
@@ -303,6 +305,15 @@ class SoundEngineService {
         setTimeout(() => this.playTone(783.99, 0.1, 'triangle', v), 90);
         setTimeout(() => this.playTone(987.77, 0.12, 'triangle', v), 180);
         setTimeout(() => this.playTone(1174.66, 0.28, 'triangle', v), 270);
+        break;
+      case 'goal_reached':
+        this.playTone(523.25, 0.12, 'triangle', v);
+        setTimeout(() => this.playTone(659.25, 0.12, 'triangle', v), 90);
+        setTimeout(() => this.playTone(783.99, 0.14, 'triangle', v), 180);
+        setTimeout(() => this.playTone(1046.5, 0.18, 'triangle', v), 270);
+        setTimeout(() => this.playTone(1318.51, 0.24, 'triangle', v), 370);
+        setTimeout(() => this.playTone(1567.98, 0.42, 'sine', v * 0.9), 480);
+        setTimeout(() => this.playNoiseBurst(0.22, v * 0.35), 260);
         break;
       case 'victory_fanfare':
         this.playTone(523.25, 0.14, 'triangle', v);

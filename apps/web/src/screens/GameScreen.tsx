@@ -29,6 +29,7 @@ import {
   WrongAnswerPenalty,
   canPlayerActOnTeamTurn,
   getRoomParticipantStats,
+  sortTeamsByStanding,
 } from '@prl-oca/shared';
 import { useGameStore } from '../stores/useGameStore';
 import { BoardScene3D } from '../scenes/BoardScene3D';
@@ -138,6 +139,7 @@ export const GameScreen: React.FC = () => {
     isRollingAnimation,
     isTokenMoving,
     challengeModalReady,
+    goalCelebration,
     playerId,
     isTeacher,
     projectorMode,
@@ -197,10 +199,7 @@ export const GameScreen: React.FC = () => {
   const diceValues =
     roomState.lastDiceRoll?.dice ?? (roomState.config.diceMode === '2d6' ? [6, 6] : [6]);
 
-  const sortedStandings = [...roomState.teams].sort((a, b) => {
-    if (b.position !== a.position) return b.position - a.position;
-    return b.score - a.score;
-  });
+  const sortedStandings = sortTeamsByStanding(roomState.teams, roomState.finishedTeamIds);
   const participantStats = getRoomParticipantStats(roomState);
   const turnAuth = canPlayerActOnTeamTurn(roomState, playerId);
   const isMyTurn = turnAuth.allowed;
@@ -262,6 +261,7 @@ export const GameScreen: React.FC = () => {
             cameraZoomDelta={cameraZoomDelta}
             graphicsQuality={graphicsQuality}
             reducedMotion={reducedMotion}
+            celebratingGoal={Boolean(goalCelebration)}
             hideHtmlOverlays={anyModalOpen}
             onSelectTile={(tile) => setInspectedTile(tile)}
             onActiveTokenArrive={notifyTokenArrived}
@@ -421,6 +421,49 @@ export const GameScreen: React.FC = () => {
         {errorMessage && (
           <div className="hud-error-toast" onClick={clearError}>
             <span>{errorMessage}</span>
+          </div>
+        )}
+
+        {/* Animación Celebratoria al Llegar a la Casilla #48 (Meta Final) */}
+        {goalCelebration && (
+          <div
+            className="goal-celebration-overlay"
+            role="status"
+            aria-live="polite"
+            aria-label="Celebración de llegada al final del tablero"
+          >
+            <div className="goal-confetti-rain" aria-hidden="true">
+              {Array.from({ length: 18 }).map((_, idx) => (
+                <span
+                  key={idx}
+                  className="goal-confetti-spark"
+                  style={{
+                    left: `${6 + ((idx * 17) % 88)}%`,
+                    animationDelay: `${(idx % 6) * 0.08}s`,
+                    backgroundColor: ['#FFB800', '#10B981', '#38BDF8', '#F43F5E'][idx % 4],
+                  }}
+                />
+              ))}
+            </div>
+            <div
+              className="goal-celebration-banner modal-animate-in"
+              style={{ borderColor: goalCelebration.teamColor }}
+            >
+              <Trophy size={24} className="text-yellow" />
+              <div>
+                <strong>
+                  {goalCelebration.finishOrder > 0
+                    ? `🏁 ¡META #48 COMPLETADA · PUESTO #${goalCelebration.finishOrder}!`
+                    : '🏁 ¡LLEGADA A LA CASILLA #48 · META CERO ACCIDENTES!'}
+                </strong>
+                <span>
+                  {goalCelebration.playerName} ({goalCelebration.teamName.split('(')[0].trim()})
+                  {goalCelebration.finishOrder > 0 && !goalCelebration.allFinished
+                    ? ' · La partida continúa hasta que lleguen todos los jugadores'
+                    : ''}
+                </span>
+              </div>
+            </div>
           </div>
         )}
 
@@ -657,6 +700,9 @@ export const GameScreen: React.FC = () => {
                   <div className="standing-top">
                     <span className="standing-rank">#{rank + 1}</span>
                     <strong className="standing-name">{team.name.split('(')[0].trim()}</strong>
+                    {team.finishOrder && (
+                      <span className="standing-meta-badge">🏁 Meta #{team.finishOrder}</span>
+                    )}
                     <span className="standing-score">{team.score} pts</span>
                   </div>
 

@@ -12,6 +12,7 @@ interface WorkerToken3DProps {
   totalTeams: number;
   isActiveTurn: boolean;
   reducedMotion?: boolean;
+  celebratingGoal?: boolean;
   hideHtmlOverlays?: boolean;
   onActiveTokenProgress?: (
     worldPos: [number, number, number],
@@ -32,6 +33,7 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
   totalTeams,
   isActiveTurn,
   reducedMotion = false,
+  celebratingGoal = false,
   hideHtmlOverlays = false,
   onActiveTokenProgress,
   onActiveTokenArrive,
@@ -144,14 +146,20 @@ export const WorkerToken3D: React.FC<WorkerToken3DProps> = ({
         }
       }
     } else {
-      const idleBounce = isActiveTurn && !reducedMotion ? Math.abs(Math.sin(t * 3.0)) * 0.12 : 0;
+      const isAtGoal = team.position === 48 || team.finishOrder !== undefined;
+      const idleBounce =
+        (celebratingGoal || (isAtGoal && isActiveTurn)) && !reducedMotion
+          ? Math.abs(Math.sin(t * 5.2)) * 0.34
+          : isActiveTurn && !reducedMotion
+          ? Math.abs(Math.sin(t * 3.0)) * 0.12
+          : 0;
       groupRef.current.position.set(
         currentTile.position[0] + offsetX,
         currentTile.position[1] + 0.35 + idleBounce,
         currentTile.position[2] + offsetZ
       );
-      if (isActiveTurn && !reducedMotion) {
-        groupRef.current.rotation.y = Math.sin(t * 1.4) * 0.3;
+      if ((isActiveTurn || celebratingGoal) && !reducedMotion) {
+        groupRef.current.rotation.y = celebratingGoal ? t * 3.2 : Math.sin(t * 1.4) * 0.3;
       }
     }
   });
