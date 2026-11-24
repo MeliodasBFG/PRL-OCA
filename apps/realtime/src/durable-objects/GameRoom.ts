@@ -66,6 +66,7 @@ export class GameRoom {
   private processedActionIds = new Set<string>();
   private processedActionResults = new Map<string, ServerToClientMessage>();
   private processedActionsLoaded = false;
+  private gameplayLock: Promise<void> = Promise.resolve();
   private rateLimiter = new RateLimiter(45, 5000);
   private socketPlayers = new Map<WebSocket, SocketAttachment>();
 
@@ -73,6 +74,20 @@ export class GameRoom {
     private readonly ctx: DurableObjectState,
     private readonly env: Env
   ) {}
+
+  private async runSerialized<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this.gameplayLock;
+    let release!: () => void;
+    this.gameplayLock = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
 
   private async loadVerifiedExistingRoom(
     expectedRoomCode?: string
@@ -549,12 +564,28 @@ export class GameRoom {
         );
       }
 
-      const authRes = await this.executeValidatedGameplayAction(null, loaded.state, {
-        ...actionMsg,
-        playerToken: suppliedToken,
+      const authRes = await this.runSerialized(async () => {
+        const fresh = await this.loadVerifiedExistingRoom(roomCode);
+        const targetState = fresh.ok ? fresh.state : loaded.state;
+        return this.executeValidatedGameplayAction(null, targetState, {
+          ...actionMsg,
+          playerToken: suppliedToken,
+        });
       });
       if (!authRes.ok) {
-        return this.jsonError(authRes.status, authRes.code, authRes.message, cors);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            ok: false,
+            error: authRes.code,
+            message: authRes.message,
+            ...(authRes.includeState ? { state: loaded.state } : {}),
+          }),
+          {
+            status: authRes.status,
+            headers: { ...cors, 'Content-Type': 'application/json' },
+          }
+        );
       }
       return new Response(
         JSON.stringify({
@@ -769,21 +800,23 @@ export class GameRoom {
       return;
     }
 
-    // Deduplicate actions (preserving idempotent replay for authenticated gameplay operations)
+    // Deduplicate non-gameplay actions upfront; gameplay actions handle idempotent replay inside runSerialized
     await this.ensureProcessedActionsLoaded();
-    if ('actionId' in msg) {
-      if (msg.type === 'JOIN_ROOM' && this.processedActionIds.has(msg.actionId)) {
+    const isGameplayAction =
+      msg.type === 'TOGGLE_READY' ||
+      msg.type === 'SELECT_TEAM' ||
+      msg.type === 'ROLL_DICE' ||
+      msg.type === 'SUBMIT_ANSWER' ||
+      msg.type === 'COMPLETE_CHALLENGE_3D' ||
+      msg.type === 'NEXT_TURN';
+    if ('actionId' in msg && !isGameplayAction) {
+      if (this.processedActionIds.has(msg.actionId)) {
         return;
       }
-      if (!this.processedActionResults.has(msg.actionId)) {
-        if (this.processedActionIds.has(msg.actionId)) {
-          return;
-        }
-        this.processedActionIds.add(msg.actionId);
-        if (this.processedActionIds.size > 500) {
-          const first = this.processedActionIds.values().next().value;
-          if (first) this.processedActionIds.delete(first);
-        }
+      this.processedActionIds.add(msg.actionId);
+      if (this.processedActionIds.size > 500) {
+        const first = this.processedActionIds.values().next().value;
+        if (first) this.processedActionIds.delete(first);
       }
     }
 
@@ -1005,12 +1038,17 @@ export class GameRoom {
       case 'SUBMIT_ANSWER':
       case 'COMPLETE_CHALLENGE_3D':
       case 'NEXT_TURN': {
-        const res = await this.executeValidatedGameplayAction(ws, state, msg);
+        const res = await this.runSerialized(async () => {
+          const fresh = await this.loadVerifiedExistingRoom(state.roomCode);
+          const targetState = fresh.ok ? fresh.state : state;
+          return this.executeValidatedGameplayAction(ws, targetState, msg);
+        });
         if (!res.ok) {
           this.sendToSocket(ws, {
             type: 'ERROR',
             code: res.code,
             message: res.message,
+            ...(res.includeState ? { state: this.stateData ?? state } : {}),
           });
           return;
         }
@@ -1055,7 +1093,7 @@ export class GameRoom {
     >
   ): Promise<
     | { ok: true; deduplicated?: boolean; event: ServerToClientMessage }
-    | { ok: false; status: number; code: string; message: string }
+    | { ok: false; status: number; code: string; message: string; includeState?: boolean }
   > {
     const db = new DatabaseService(this.env.DB);
     const socketAtt = ws ? this.getSocketAttachment(ws) : undefined;
@@ -1169,6 +1207,20 @@ export class GameRoom {
       }
 
       case 'ROLL_DICE': {
+        const turnPrecheck = canPlayerActOnTeamTurn(state, msg.playerId);
+        if (!turnPrecheck.allowed) {
+          const code = turnPrecheck.errorCode ?? 'NOT_YOUR_TURN';
+          console.warn(
+            `[DO:${state.roomCode}] Rejected ROLL_DICE transport=${transport} playerId=${msg.playerId} code=${code} activePlayerId=${state.activePlayerId ?? 'none'}`
+          );
+          return {
+            ok: false,
+            status: code === 'PLAYER_NOT_FOUND' ? 404 : 409,
+            code,
+            message: turnPrecheck.reason ?? 'No es tu turno.',
+            includeState: true,
+          };
+        }
         const questions = await db.getQuestions();
         const rollRes = rollDiceServerSide(state, msg.playerId, questions);
         if (!rollRes.ok || !rollRes.roll) {
@@ -1187,6 +1239,7 @@ export class GameRoom {
             status,
             code,
             message: rollRes.error ?? 'Acción de dados no permitida.',
+            includeState: true,
           };
         }
         return finalizeSuccess({
@@ -1211,6 +1264,7 @@ export class GameRoom {
             status,
             code,
             message: ansRes.error ?? 'No se pudo procesar la respuesta.',
+            includeState: code === 'NOT_YOUR_TURN',
           };
         }
         if (state.status === 'finished') {
@@ -1239,6 +1293,7 @@ export class GameRoom {
             status,
             code,
             message: chRes.error ?? 'No se pudo completar el desafío 3D.',
+            includeState: code === 'NOT_YOUR_TURN',
           };
         }
         return finalizeSuccess({
@@ -1259,7 +1314,8 @@ export class GameRoom {
             code: turnAuth.errorCode ?? 'NOT_YOUR_TURN',
             message:
               turnAuth.reason ??
-              'Solo el equipo activo o el docente pueden avanzar al siguiente turno.',
+              'Solo el equipo activo puede avanzar al siguiente turno.',
+            includeState: true,
           };
         }
         advanceTurnServerSide(state);

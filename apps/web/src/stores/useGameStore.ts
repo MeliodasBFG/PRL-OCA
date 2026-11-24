@@ -269,6 +269,7 @@ export interface GameStore {
   createRoom: (params: {
     teacherName: string;
     teacherPin: string;
+    teacherParticipatesAsPlayer?: boolean;
     config: Partial<GameConfig>;
   }) => Promise<void>;
   joinRoom: (params: {
@@ -400,6 +401,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         message?: string;
         deduplicated?: boolean;
         event?: ServerToClientMessage;
+        state?: GameRoomState;
       } | null;
 
       if (res.ok && data?.ok && data.event) {
@@ -429,7 +431,10 @@ export const useGameStore = create<GameStore>((set, get) => {
         targetUrl,
         origin: typeof window !== 'undefined' ? window.location.origin : undefined,
       });
-      set({ errorMessage: diagnostic });
+      set((prev) => ({
+        errorMessage: diagnostic,
+        ...(data?.state ? { roomState: data.state } : { roomState: prev.roomState }),
+      }));
       return false;
     } catch (err) {
       clearTimeout(timeoutTimer);
@@ -738,12 +743,13 @@ export const useGameStore = create<GameStore>((set, get) => {
         });
         return;
       }
-      set({
+      set((prev) => ({
         errorMessage: formattedErr,
+        ...(msg.state ? { roomState: msg.state } : { roomState: prev.roomState }),
         isRollingAnimation: false,
         isTokenMoving: false,
         challengeModalReady: true,
-      });
+      }));
     }
   };
 
@@ -931,7 +937,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
     },
 
-    createRoom: async ({ teacherName, teacherPin, config }) => {
+    createRoom: async ({ teacherName, teacherPin, teacherParticipatesAsPlayer = false, config }) => {
       soundEngine.unlockAudio();
       soundEngine.playSfx('menu_open');
 
@@ -966,6 +972,7 @@ export const useGameStore = create<GameStore>((set, get) => {
               teacherPin: cleanTeacherPin,
               teacherName: teacherDisplayName,
               teacherId: serverPlayerId,
+              teacherParticipatesAsPlayer,
             }),
             signal: controller.signal,
           });
@@ -1033,6 +1040,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           playerId: serverPlayerId,
           playerName: teacherDisplayName,
           isTeacher: true,
+          participatesAsPlayer: Boolean(teacherParticipatesAsPlayer),
         });
         resolvedPlayerId = joinRes.player?.id ?? serverPlayerId;
       }
@@ -1065,6 +1073,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           playerId: resolvedPlayerId,
           playerName: teacherDisplayName,
           isTeacher: true,
+          participatesAsPlayer: Boolean(teacherParticipatesAsPlayer),
           teacherPin: cleanTeacherPin,
           teacherToken: token || undefined,
           playerToken: serverPlayerToken || undefined,

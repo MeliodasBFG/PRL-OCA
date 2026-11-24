@@ -27,6 +27,7 @@ export const CreateJoinScreen: React.FC = () => {
   const [difficultyFilter, setDifficultyFilter] = useState<Difficulty | 'todas'>('todas');
   const [wrongAnswerPenalty, setWrongAnswerPenalty] = useState<WrongAnswerPenalty>(0);
   const [allowLateJoin, setAllowLateJoin] = useState<boolean>(false);
+  const [teacherParticipatesAsPlayer, setTeacherParticipatesAsPlayer] = useState<boolean>(true);
 
   // Join Room Form State
   const [joinCode, setJoinCode] = useState('PRL101');
@@ -54,6 +55,7 @@ export const CreateJoinScreen: React.FC = () => {
     await createRoom({
       teacherName,
       teacherPin,
+      teacherParticipatesAsPlayer,
       config: {
         roomName,
         mode,
@@ -235,6 +237,21 @@ export const CreateJoinScreen: React.FC = () => {
                   value={teacherPin}
                   onChange={(e) => setTeacherPin(e.target.value)}
                 />
+              </label>
+
+              <label>
+                Participación del Profesor en el Tablero:
+                <select
+                  value={teacherParticipatesAsPlayer ? 'player' : 'moderator'}
+                  onChange={(e) => setTeacherParticipatesAsPlayer(e.target.value === 'player')}
+                >
+                  <option value="player">
+                    Participa como jugador (con ficha y turno propio)
+                  </option>
+                  <option value="moderator">
+                    Solo moderador de aula (sin ficha ni lanzamiento de dados)
+                  </option>
+                </select>
               </label>
             </div>
 

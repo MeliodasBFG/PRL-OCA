@@ -312,6 +312,7 @@ export type RoomJoinErrorCode =
   | 'INVALID_PLAYER_TOKEN'
   | 'UNAUTHORIZED_PLAYER'
   | 'PLAYER_NOT_FOUND'
+  | 'NOT_YOUR_TURN'
   | 'JOIN_REJECTED';
 
 export interface GameRoomState {
@@ -321,6 +322,7 @@ export interface GameRoomState {
   players: Player[];
   teams: Team[];
   activeTeamIndex: number;
+  activePlayerId?: string | null;
   turnNumber: number;
   phase: 'waiting_roll' | 'moving' | 'answering' | 'showing_feedback' | 'finished';
   lastDiceRoll: DiceRollResult | null;
@@ -474,6 +476,7 @@ export type ServerToClientMessage =
       type: 'ERROR';
       code: string;
       message: string;
+      state?: GameRoomState;
     }
   | {
       type: 'PONG';

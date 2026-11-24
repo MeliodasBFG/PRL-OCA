@@ -168,14 +168,17 @@ function createProdWorkerHarness(options?: { secret?: string; simulateDbCrash?: 
 async function setupPlayingMatch(
   harness: ReturnType<typeof createProdWorkerHarness>,
   studentCount = 1,
-  teamCount = 2
+  teamCount = 2,
+  options?: { teacherParticipatesAsPlayer?: boolean }
 ) {
+  const teacherParticipatesAsPlayer = Boolean(options?.teacherParticipatesAsPlayer);
   const createRes = await harness.httpFetch('/api/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       teacherPin: 'PIN2026',
       teacherName: 'Prof. Producción',
+      teacherParticipatesAsPlayer,
       config: {
         roomName: 'Simulación Producción',
         mode: 'teams',
@@ -200,6 +203,7 @@ async function setupPlayingMatch(
     playerId: room.playerId,
     playerName: 'Prof. Producción',
     isTeacher: true,
+    participatesAsPlayer: teacherParticipatesAsPlayer,
     teacherToken: room.teacherToken,
     playerToken: room.playerToken,
   });
@@ -269,9 +273,9 @@ describe('ROLL_DICE en Producción: CORS /action, WebSocket, Fallback HTTP, Idem
     expect(rolledS[0].roll.rolledByPlayerId).toBe(students[0].playerId);
     expect(teacherSock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
 
-    // Nueva partida: Profesor conectado por WebSocket lanza dado directamente
+    // Nueva partida con docente participante: cuando ES su turno lanza por WebSocket y mueve su ficha
     const harness2 = createProdWorkerHarness();
-    const m2 = await setupPlayingMatch(harness2, 1, 2);
+    const m2 = await setupPlayingMatch(harness2, 1, 2, { teacherParticipatesAsPlayer: true });
     await harness2.sendWs(m2.room.roomCode, m2.teacherSock, {
       type: 'ROLL_DICE',
       actionId: 'ws_roll_teacher',
@@ -395,7 +399,7 @@ describe('ROLL_DICE en Producción: CORS /action, WebSocket, Fallback HTTP, Idem
     expect(ootHttp.headers.get('Access-Control-Allow-Origin')).toBe(PROD_ORIGIN);
     const ootJson = (await ootHttp.json()) as { error: string; message: string };
     expect(ootJson.error).toBe('NOT_YOUR_TURN');
-    expect(ootJson.message).toContain('Es el turno del');
+    expect(ootJson.message).toContain('Es el turno de');
 
     // Error 400 JSON inválido también conserva CORS
     const badReq = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
@@ -654,7 +658,7 @@ describe('ROLL_DICE en Producción: CORS /action, WebSocket, Fallback HTTP, Idem
 
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(useGameStore.getState().isRollingAnimation).toBe(false);
-      expect(useGameStore.getState().errorMessage).toContain('Es el turno del');
+      expect(useGameStore.getState().errorMessage).toContain('Es el turno de');
       // La posición de ambos equipos sigue exactamente en 1
       expect(useGameStore.getState().roomState?.teams[0].position).toBe(1);
       expect(useGameStore.getState().roomState?.teams[1].position).toBe(1);
@@ -671,7 +675,7 @@ describe('ROLL_DICE en Producción: CORS /action, WebSocket, Fallback HTTP, Idem
       await vi.advanceTimersByTimeAsync(1300);
       expect(useGameStore.getState().roomState?.teams[0].position).toBe(1);
       expect(useGameStore.getState().roomState?.teams[1].position).toBe(1);
-      expect(useGameStore.getState().errorMessage).toContain('Es el turno del');
+      expect(useGameStore.getState().errorMessage).toContain('Es el turno de');
     } finally {
       vi.useRealTimers();
       vi.unstubAllGlobals();

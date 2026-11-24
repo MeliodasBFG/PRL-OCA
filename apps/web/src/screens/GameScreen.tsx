@@ -197,6 +197,10 @@ export const GameScreen: React.FC = () => {
   const participantStats = getRoomParticipantStats(roomState);
   const turnAuth = canPlayerActOnTeamTurn(roomState, playerId);
   const isMyTurn = turnAuth.allowed;
+  const activePlayerId = turnAuth.activePlayerId ?? roomState.activePlayerId ?? null;
+  const activePlayer = activePlayerId
+    ? roomState.players.find((p) => p.id === activePlayerId)
+    : undefined;
 
   const anyModalOpen = Boolean(
     (roomState.activeChallenge &&
@@ -261,7 +265,10 @@ export const GameScreen: React.FC = () => {
           >
             <div className="hud-turn-main">
               <span className="turn-counter-pill">TURNO #{roomState.turnNumber}</span>
-              <h2 style={{ color: activeTeam.hexColor }}>{activeTeam.name}</h2>
+              <h2 style={{ color: activeTeam.hexColor }}>
+                {activeTeam.name}
+                {activePlayer ? ` · Lanza: ${activePlayer.name}` : ''}
+              </h2>
               <span className="turn-tile-pill">
                 Casilla #{activeTeam.position}/48 · {currentTile.name} (
                 {INDUSTRIAL_ZONE_LABELS[currentTile.zone]})
@@ -554,13 +561,17 @@ export const GameScreen: React.FC = () => {
                       : isTokenMoving
                       ? 'AVANZANDO FICHA...'
                       : !isMyTurn
-                      ? 'ESPERANDO TURNO'
+                      ? 'Esperando tu turno'
                       : 'LANZAR DADOS 3D'}
                   </strong>
                   <span>
                     {isMyTurn
                       ? `Tu turno · ${activeTeam?.name.split('(')[0].trim()}`
-                      : `Turno de ${activeTeam?.name.split('(')[0].trim()}`}
+                      : `Turno de ${
+                          activePlayer
+                            ? `${activePlayer.name} (${activeTeam?.name.split('(')[0].trim()})`
+                            : activeTeam?.name.split('(')[0].trim()
+                        }`}
                   </span>
                 </div>
               </button>

@@ -1,0 +1,810 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  GameRoomState,
+  INITIAL_QUESTION_BANK,
+  ServerToClientMessage,
+  canPlayerActOnTeamTurn,
+} from '@prl-oca/shared';
+import workerEntry, { GameRoom } from '../apps/realtime/src/index';
+import { useGameStore } from '../apps/web/src/stores/useGameStore';
+
+const PROD_ORIGIN = 'https://prl-oca.pages.dev';
+const WORKER_URL = 'https://realtime.danielcalvinoouro.workers.dev';
+const PROD_ALLOWED_ORIGIN =
+  'https://prl-oca-3d.pages.dev,https://*.prl-oca-3d.pages.dev,https://prl-oca-3d-online.pages.dev,https://*.prl-oca-3d-online.pages.dev,https://prl-oca.pages.dev,https://*.prl-oca.pages.dev';
+
+class MockSocket {
+  public inbox: ServerToClientMessage[] = [];
+  private attachment: unknown = undefined;
+
+  public send(payload: string): void {
+    this.inbox.push(JSON.parse(payload) as ServerToClientMessage);
+  }
+
+  public close(): void {}
+
+  public serializeAttachment(att: unknown): void {
+    this.attachment = att;
+  }
+
+  public deserializeAttachment(): unknown {
+    return this.attachment;
+  }
+
+  public messagesOfType<T extends ServerToClientMessage['type']>(
+    type: T
+  ): Array<Extract<ServerToClientMessage, { type: T }>> {
+    return this.inbox.filter((m) => m.type === type) as Array<
+      Extract<ServerToClientMessage, { type: T }>
+    >;
+  }
+}
+
+interface SimulatedDORecord {
+  roomCode: string;
+  storageMap: Map<string, unknown>;
+  sockets: MockSocket[];
+  ctx: {
+    storage: {
+      get: <T>(key: string) => Promise<T | undefined>;
+      put: (key: string, val: unknown) => Promise<void>;
+    };
+    getWebSockets: () => WebSocket[];
+  };
+  instance: GameRoom;
+}
+
+function createTurnHarness() {
+  const namespaces = new Map<string, SimulatedDORecord>();
+
+  const buildInstance = (ctx: SimulatedDORecord['ctx']) =>
+    new GameRoom(ctx as never, {
+      GAME_ROOMS: {} as DurableObjectNamespace,
+      ENVIRONMENT: 'production',
+      ALLOWED_ORIGIN: PROD_ALLOWED_ORIGIN,
+      TEACHER_TOKEN_SECRET: 'turn-auth-secret',
+      DB: {
+        prepare: () => ({
+          bind: () => ({
+            all: async () => ({ results: [] }),
+            run: async () => ({ success: true }),
+          }),
+          all: async () => ({ results: INITIAL_QUESTION_BANK }),
+        }),
+      } as unknown as D1Database,
+    });
+
+  const getOrCreateRecord = (name: string): SimulatedDORecord => {
+    const existing = namespaces.get(name);
+    if (existing) return existing;
+    const storageMap = new Map<string, unknown>();
+    const sockets: MockSocket[] = [];
+    const ctx: SimulatedDORecord['ctx'] = {
+      storage: {
+        get: async <T>(key: string) => storageMap.get(key) as T | undefined,
+        put: async (key: string, val: unknown) => {
+          storageMap.set(key, val);
+        },
+      },
+      getWebSockets: () => sockets as unknown as WebSocket[],
+    };
+    const rec: SimulatedDORecord = {
+      roomCode: name,
+      storageMap,
+      sockets,
+      ctx,
+      instance: buildInstance(ctx),
+    };
+    namespaces.set(name, rec);
+    return rec;
+  };
+
+  const env = {
+    ENVIRONMENT: 'production',
+    ALLOWED_ORIGIN: PROD_ALLOWED_ORIGIN,
+    TEACHER_TOKEN_SECRET: 'turn-auth-secret',
+    GAME_ROOMS: {
+      idFromName: (name: string) => name as unknown as DurableObjectId,
+      get: (id: DurableObjectId) => ({
+        fetch: (req: Request) => getOrCreateRecord(String(id)).instance.fetch(req),
+      }),
+    },
+    DB: {
+      prepare: () => ({
+        bind: () => ({ all: async () => ({ results: [] }), run: async () => ({ success: true }) }),
+        all: async () => ({ results: INITIAL_QUESTION_BANK }),
+      }),
+    },
+  };
+
+  return {
+    httpFetch: (path: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      if (!headers.has('Origin')) headers.set('Origin', PROD_ORIGIN);
+      return workerEntry.fetch(new Request(`${WORKER_URL}${path}`, { ...init, headers }), env as never);
+    },
+    connectSocket: async (roomCode: string, joinMsg: Record<string, unknown>) => {
+      const rec = getOrCreateRecord(roomCode.toUpperCase());
+      const sock = new MockSocket();
+      rec.sockets.push(sock);
+      await rec.instance.webSocketMessage(sock as unknown as WebSocket, JSON.stringify(joinMsg));
+      return sock;
+    },
+    closeSocket: async (roomCode: string, sock: MockSocket) => {
+      const rec = getOrCreateRecord(roomCode.toUpperCase());
+      const idx = rec.sockets.indexOf(sock);
+      if (idx >= 0) rec.sockets.splice(idx, 1);
+      await rec.instance.webSocketClose(sock as unknown as WebSocket);
+    },
+    sendWs: async (roomCode: string, sock: MockSocket, msg: Record<string, unknown>) => {
+      const rec = getOrCreateRecord(roomCode.toUpperCase());
+      await rec.instance.webSocketMessage(sock as unknown as WebSocket, JSON.stringify(msg));
+    },
+  };
+}
+
+async function setupRoom(params?: {
+  studentCount?: number;
+  mode?: 'teams' | 'individual';
+  teamCount?: number;
+  teacherParticipatesAsPlayer?: boolean;
+}) {
+  const harness = createTurnHarness();
+  const teacherParticipatesAsPlayer = params?.teacherParticipatesAsPlayer ?? true;
+  const studentCount = params?.studentCount ?? 2;
+  const mode = params?.mode ?? 'teams';
+  const teamCount = params?.teamCount ?? 3;
+
+  const cRes = await harness.httpFetch('/api/rooms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      teacherPin: 'PIN2026',
+      teacherName: 'Prof. PRL',
+      teacherParticipatesAsPlayer,
+      config: {
+        roomName: 'Turnos Autoritativos',
+        mode,
+        teamCount,
+        maxPlayers: 15,
+        diceMode: '1d6',
+      },
+    }),
+  });
+  const room = (await cRes.json()) as {
+    roomCode: string;
+    playerId: string;
+    playerToken: string;
+    teacherToken: string;
+    state: GameRoomState;
+  };
+
+  const teacherSock = await harness.connectSocket(room.roomCode, {
+    type: 'JOIN_ROOM',
+    actionId: 'ws_t_init',
+    playerId: room.playerId,
+    playerName: 'Prof. PRL',
+    isTeacher: true,
+    participatesAsPlayer: teacherParticipatesAsPlayer,
+    teacherToken: room.teacherToken,
+    playerToken: room.playerToken,
+  });
+
+  const students: Array<{
+    playerId: string;
+    playerToken: string;
+    playerName: string;
+    sock: MockSocket;
+  }> = [];
+
+  for (let i = 1; i <= studentCount; i++) {
+    const jRes = await harness.httpFetch(`/api/rooms/${room.roomCode}/join`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playerName: `Alumno ${i}` }),
+    });
+    const jData = (await jRes.json()) as {
+      playerId: string;
+      playerToken: string;
+    };
+    const sock = await harness.connectSocket(room.roomCode, {
+      type: 'JOIN_ROOM',
+      actionId: `ws_s_${i}`,
+      playerId: jData.playerId,
+      playerName: `Alumno ${i}`,
+      playerToken: jData.playerToken,
+    });
+    students.push({
+      playerId: jData.playerId,
+      playerToken: jData.playerToken,
+      playerName: `Alumno ${i}`,
+      sock,
+    });
+  }
+
+  await harness.sendWs(room.roomCode, teacherSock, {
+    type: 'TEACHER_ACTION',
+    actionId: 'cmd_start',
+    teacherToken: room.teacherToken,
+    command: { kind: 'START_GAME' },
+  });
+
+  return { harness, room, teacherSock, students };
+}
+
+function getLatestState(sock: MockSocket): GameRoomState {
+  for (let i = sock.inbox.length - 1; i >= 0; i--) {
+    const m = sock.inbox[i];
+    if ('state' in m && m.state) return m.state;
+  }
+  throw new Error('No state found on socket');
+}
+
+async function advancePastCurrentTurn(
+  harness: ReturnType<typeof createTurnHarness>,
+  roomCode: string,
+  ownerSock: MockSocket,
+  ownerId: string,
+  ownerToken: string,
+  teacherToken: string,
+  teacherSock: MockSocket
+) {
+  const cur = getLatestState(ownerSock);
+  if (cur.phase === 'waiting_roll') {
+    await harness.sendWs(roomCode, ownerSock, {
+      type: 'ROLL_DICE',
+      actionId: `adv_roll_${Date.now()}_${Math.random()}`,
+      playerId: ownerId,
+      playerToken: ownerToken,
+    });
+  }
+  const afterRoll = getLatestState(ownerSock);
+  // Si cayó en Oca / casilla con extraRoll no queremos quedarnos en el mismo turno -> usar FORCE_NEXT_TURN explícito
+  // o si abrió challenge resolverlo / avanzar al siguiente turno limpiamente
+  if (afterRoll.activeChallenge && !afterRoll.activeChallenge.answered) {
+    if (afterRoll.activeChallenge.kind === 'question' && afterRoll.activeChallenge.question) {
+      await harness.sendWs(roomCode, ownerSock, {
+        type: 'SUBMIT_ANSWER',
+        actionId: `adv_ans_${Date.now()}`,
+        playerId: ownerId,
+        selectedIndices: [0],
+        collaborated: true,
+        playerToken: ownerToken,
+      });
+    } else if (
+      afterRoll.activeChallenge.kind === 'challenge3d' &&
+      afterRoll.activeChallenge.challenge3d
+    ) {
+      await harness.sendWs(roomCode, ownerSock, {
+        type: 'COMPLETE_CHALLENGE_3D',
+        actionId: `adv_ch_${Date.now()}`,
+        playerId: ownerId,
+        selectedHotspotIds: [afterRoll.activeChallenge.challenge3d.hotspots[0].id],
+        playerToken: ownerToken,
+      });
+    }
+  }
+  const prevTeamIdx = afterRoll.activeTeamIndex;
+  await harness.sendWs(roomCode, ownerSock, {
+    type: 'NEXT_TURN',
+    actionId: `adv_next_${Date.now()}`,
+    playerId: ownerId,
+    playerToken: ownerToken,
+  });
+  const afterNext = getLatestState(ownerSock);
+  if (afterNext.activeTeamIndex === prevTeamIdx) {
+    // Cayó en Oca con tirada extra: avanzar administrativamente para probar al siguiente participante
+    await harness.sendWs(roomCode, teacherSock, {
+      type: 'TEACHER_ACTION',
+      actionId: `adv_force_${Date.now()}`,
+      teacherToken,
+      command: { kind: 'FORCE_NEXT_TURN' },
+    });
+  }
+}
+
+describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Pruebas 1-12)', () => {
+  it('PRUEBA 1: Es el turno del profesor. El profesor lanza -> aceptado y mueve solo su ficha', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    const st0 = getLatestState(teacherSock);
+    expect(st0.activePlayerId).toBe(room.playerId);
+    const teacherTeamId = st0.players.find((p) => p.id === room.playerId)!.teamId;
+
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p1_teacher_roll',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    });
+
+    expect(teacherSock.messagesOfType('ERROR')).toHaveLength(0);
+    const rolled = teacherSock.messagesOfType('DICE_ROLLED').slice(-1)[0]!;
+    expect(rolled.roll.rolledByPlayerId).toBe(room.playerId);
+    expect(rolled.roll.rolledByTeamId).toBe(teacherTeamId);
+    expect(students[0].sock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+    const otherTeam = rolled.state.teams.find((t) => t.id !== teacherTeamId)!;
+    expect(otherTeam.position).toBe(1);
+  });
+
+  it('PRUEBA 2: Es el turno del alumno 1. El profesor intenta lanzar -> NOT_YOUR_TURN y ninguna ficha se mueve', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    // Completar turno del profesor para pasar exactamente al Alumno 1
+    await advancePastCurrentTurn(
+      harness,
+      room.roomCode,
+      teacherSock,
+      room.playerId,
+      room.playerToken,
+      room.teacherToken,
+      teacherSock
+    );
+
+    const beforeAttempt = getLatestState(teacherSock);
+    expect(beforeAttempt.activePlayerId).toBe(students[0].playerId);
+    const prevPositions = beforeAttempt.teams.map((t) => t.position);
+
+    // Profesor intenta lanzar en turno del Alumno 1 (por WS y por HTTP /action)
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p2_teacher_steal_ws',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    });
+
+    const errWs = teacherSock.messagesOfType('ERROR').slice(-1)[0]!;
+    expect(errWs.code).toBe('NOT_YOUR_TURN');
+
+    const httpAttempt = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Player-Token': room.playerToken,
+        'X-Player-Id': room.playerId,
+      },
+      body: JSON.stringify({
+        playerId: room.playerId,
+        playerToken: room.playerToken,
+        message: {
+          type: 'ROLL_DICE',
+          actionId: 'p2_teacher_steal_http',
+          playerId: room.playerId,
+          playerToken: room.playerToken,
+        },
+      }),
+    });
+    expect(httpAttempt.status).toBe(409);
+    const httpJson = (await httpAttempt.json()) as { error: string; state: GameRoomState };
+    expect(httpJson.error).toBe('NOT_YOUR_TURN');
+    expect(httpJson.state.teams.map((t) => t.position)).toEqual(prevPositions);
+    expect(httpJson.state.activePlayerId).toBe(students[0].playerId);
+    expect(httpJson.state.phase).toBe('waiting_roll');
+  });
+
+  it('PRUEBA 3: Es el turno del alumno 1. El alumno 2 intenta lanzar -> NOT_YOUR_TURN y ninguna ficha se mueve', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 2,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: false,
+    });
+
+    const st = getLatestState(teacherSock);
+    const activeId = st.activePlayerId!;
+    const otherStu = students.find((s) => s.playerId !== activeId)!;
+    const prevPositions = st.teams.map((t) => t.position);
+
+    await harness.sendWs(room.roomCode, otherStu.sock, {
+      type: 'ROLL_DICE',
+      actionId: 'p3_stu2_roll',
+      playerId: otherStu.playerId,
+      playerToken: otherStu.playerToken,
+    });
+
+    const err = otherStu.sock.messagesOfType('ERROR').slice(-1)[0]!;
+    expect(err.code).toBe('NOT_YOUR_TURN');
+    expect(getLatestState(otherStu.sock).teams.map((t) => t.position)).toEqual(prevPositions);
+    expect(getLatestState(otherStu.sock).phase).toBe('waiting_roll');
+  });
+
+  it('PRUEBA 4: Es el turno del alumno 1. El alumno 1 lanza -> aceptado y mueve exclusivamente su ficha', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 2,
+      mode: 'individual',
+      maxPlayers: 15,
+      teacherParticipatesAsPlayer: false,
+    } as never);
+
+    const st0 = getLatestState(teacherSock);
+    const activeId = st0.activePlayerId!;
+    const activeStu = students.find((s) => s.playerId === activeId)!;
+    const activeTeamId = st0.players.find((p) => p.id === activeId)!.teamId;
+
+    await harness.sendWs(room.roomCode, activeStu.sock, {
+      type: 'ROLL_DICE',
+      actionId: 'p4_stu1_roll',
+      playerId: activeStu.playerId,
+      playerToken: activeStu.playerToken,
+    });
+
+    expect(activeStu.sock.messagesOfType('ERROR')).toHaveLength(0);
+    const rolled = activeStu.sock.messagesOfType('DICE_ROLLED').slice(-1)[0]!;
+    expect(rolled.roll.rolledByPlayerId).toBe(activeStu.playerId);
+    expect(rolled.roll.rolledByTeamId).toBe(activeTeamId);
+    for (const t of rolled.state.teams) {
+      if (t.id !== activeTeamId) expect(t.position).toBe(1);
+    }
+  });
+
+  it('PRUEBA 5: El profesor intenta lanzar dos veces seguidas -> rechazado (sin turno / fase ya lanzada) sin mover otra ficha', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p5_teacher_roll_1',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    });
+    expect(teacherSock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+    const afterFirstPos = getLatestState(teacherSock).teams.map((t) => t.position);
+
+    // Intento inmediato de segundo lanzamiento consecutivo en mismo turno
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p5_teacher_roll_2_immediate',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    });
+    const errImmediate = teacherSock.messagesOfType('ERROR').slice(-1)[0]!;
+    expect(errImmediate.code).toBe('INVALID_PHASE');
+    expect(teacherSock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+    expect(getLatestState(teacherSock).teams.map((t) => t.position)).toEqual(afterFirstPos);
+
+    // Tras pasar turno al Alumno 1, profesor intenta lanzar otra vez -> NOT_YOUR_TURN
+    await advancePastCurrentTurn(
+      harness,
+      room.roomCode,
+      teacherSock,
+      room.playerId,
+      room.playerToken,
+      room.teacherToken,
+      teacherSock
+    );
+    expect(getLatestState(teacherSock).activePlayerId).toBe(students[0].playerId);
+
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p5_teacher_roll_3_after_turn',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    });
+    expect(teacherSock.messagesOfType('ERROR').slice(-1)[0]!.code).toBe('NOT_YOUR_TURN');
+  });
+
+  it('PRUEBA 6: Dos participantes intentan lanzar simultáneamente -> solo se acepta el del turno autoritativo', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    expect(getLatestState(teacherSock).activePlayerId).toBe(room.playerId);
+
+    // Disparo concurrente vía Promise.all sobre la misma sala
+    const [resTeacher, resStudent] = await Promise.all([
+      harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Player-Token': room.playerToken,
+        },
+        body: JSON.stringify({
+          type: 'ROLL_DICE',
+          actionId: 'p6_concurrent_t',
+          playerId: room.playerId,
+          playerToken: room.playerToken,
+        }),
+      }),
+      harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Player-Token': students[0].playerToken,
+        },
+        body: JSON.stringify({
+          type: 'ROLL_DICE',
+          actionId: 'p6_concurrent_s',
+          playerId: students[0].playerId,
+          playerToken: students[0].playerToken,
+        }),
+      }),
+    ]);
+
+    expect(resTeacher.status).toBe(200);
+    expect(resStudent.status).toBe(409);
+    expect(((await resStudent.json()) as { error: string }).error).toBe('NOT_YOUR_TURN');
+    expect(teacherSock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+    expect(students[0].sock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+    expect(students[0].sock.messagesOfType('DICE_ROLLED')[0].roll.rolledByPlayerId).toBe(
+      room.playerId
+    );
+  });
+
+  it('PRUEBA 7: Un jugador envía el playerId de otro participante -> petición rechazada sin ejecutar acción', async () => {
+    const { harness, room, students } = await setupRoom({
+      studentCount: 2,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: false,
+    });
+
+    const st = getLatestState(students[0].sock);
+    const activeStu = students.find((s) => s.playerId === st.activePlayerId)!;
+    const otherStu = students.find((s) => s.playerId !== st.activePlayerId)!;
+
+    // Por WS: socket de otherStu intenta enviar playerId de activeStu
+    await harness.sendWs(room.roomCode, otherStu.sock, {
+      type: 'ROLL_DICE',
+      actionId: 'p7_spoof_ws',
+      playerId: activeStu.playerId,
+      playerToken: otherStu.playerToken,
+    });
+    expect(otherStu.sock.messagesOfType('ERROR').slice(-1)[0]!.code).toBe('UNAUTHORIZED_PLAYER');
+
+    // Por HTTP: token/header de otherStu intentando actuar con playerId de activeStu
+    const spoofHttp = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Player-Token': otherStu.playerToken,
+        'X-Player-Id': otherStu.playerId,
+      },
+      body: JSON.stringify({
+        playerId: activeStu.playerId,
+        playerToken: otherStu.playerToken,
+        message: {
+          type: 'ROLL_DICE',
+          actionId: 'p7_spoof_http',
+          playerId: activeStu.playerId,
+          playerToken: otherStu.playerToken,
+        },
+      }),
+    });
+    expect([401, 403]).toContain(spoofHttp.status);
+    expect(activeStu.sock.messagesOfType('DICE_ROLLED')).toHaveLength(0);
+  });
+
+  it('PRUEBA 8: Un jugador intenta lanzar durante una pausa -> acción rechazada y tablero intacto', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'TEACHER_ACTION',
+      actionId: 'p8_pause',
+      teacherToken: room.teacherToken,
+      command: { kind: 'PAUSE_GAME' },
+    });
+
+    expect(getLatestState(teacherSock).status).toBe('paused');
+
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p8_roll_paused',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    });
+
+    const err = teacherSock.messagesOfType('ERROR').slice(-1)[0]!;
+    expect(err.code).toBe('ROOM_NOT_PLAYING');
+    expect(err.message).toContain('pausada');
+    expect(students[0].sock.messagesOfType('DICE_ROLLED')).toHaveLength(0);
+  });
+
+  it('PRUEBA 9: El turno pasa de un alumno a otro -> ambos clientes reciben el mismo jugador activo y se actualiza Zustand', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 2,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: false,
+    });
+
+    const stInitial = getLatestState(students[0].sock);
+    const firstStu = students.find((s) => s.playerId === stInitial.activePlayerId)!;
+    const secondStu = students.find((s) => s.playerId !== stInitial.activePlayerId)!;
+
+    await advancePastCurrentTurn(
+      harness,
+      room.roomCode,
+      firstStu.sock,
+      firstStu.playerId,
+      firstStu.playerToken,
+      room.teacherToken,
+      teacherSock
+    );
+
+    const stateOnStu1 = getLatestState(firstStu.sock);
+    const stateOnStu2 = getLatestState(secondStu.sock);
+    const stateOnTeacher = getLatestState(teacherSock);
+
+    expect(stateOnStu1.activePlayerId).toBe(secondStu.playerId);
+    expect(stateOnStu2.activePlayerId).toBe(secondStu.playerId);
+    expect(stateOnTeacher.activePlayerId).toBe(secondStu.playerId);
+
+    // También comprobar validación inmediata en useGameStore para quien no tiene turno
+    useGameStore.setState({
+      screen: 'game',
+      playerId: firstStu.playerId,
+      isTeacher: false,
+      roomState: structuredClone(stateOnStu1),
+      isRollingAnimation: false,
+      errorMessage: null,
+    });
+    expect(canPlayerActOnTeamTurn(stateOnStu1, firstStu.playerId).allowed).toBe(false);
+    expect(canPlayerActOnTeamTurn(stateOnStu1, secondStu.playerId).allowed).toBe(true);
+  });
+
+  it('PRUEBA 10: Quince participantes conectados -> únicamente el jugador dueño del activePlayerId puede lanzar', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 15,
+      mode: 'teams',
+      teamCount: 3,
+      teacherParticipatesAsPlayer: false,
+    });
+
+    expect(students).toHaveLength(15);
+    const st = getLatestState(teacherSock);
+    const activePlayerId = st.activePlayerId!;
+    const authorizedStu = students.find((s) => s.playerId === activePlayerId)!;
+    const unauthorizedOthers = students.filter((s) => s.playerId !== activePlayerId);
+
+    // Ni los otros 14 alumnos (incluidos compañeros del MISMO equipo) ni el profesor pueden lanzar
+    for (const s of unauthorizedOthers) {
+      await harness.sendWs(room.roomCode, s.sock, {
+        type: 'ROLL_DICE',
+        actionId: `p10_denied_${s.playerId}`,
+        playerId: s.playerId,
+        playerToken: s.playerToken,
+      });
+      expect(s.sock.messagesOfType('ERROR').slice(-1)[0]!.code).toBe('NOT_YOUR_TURN');
+    }
+    await harness.sendWs(room.roomCode, teacherSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p10_denied_teacher',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    });
+    expect(teacherSock.messagesOfType('ERROR').slice(-1)[0]!.code).toBe('NOT_YOUR_TURN');
+    expect(teacherSock.messagesOfType('DICE_ROLLED')).toHaveLength(0);
+
+    // Ahora el único participante dueño del turno lanza con éxito
+    await harness.sendWs(room.roomCode, authorizedStu.sock, {
+      type: 'ROLL_DICE',
+      actionId: 'p10_allowed_active',
+      playerId: authorizedStu.playerId,
+      playerToken: authorizedStu.playerToken,
+    });
+    expect(authorizedStu.sock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+    expect(authorizedStu.sock.messagesOfType('DICE_ROLLED')[0].roll.rolledByPlayerId).toBe(
+      authorizedStu.playerId
+    );
+  });
+
+  it('PRUEBA 11: Reconexión durante un turno -> se conserva el activePlayerId exacto y permite completar la tirada', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 2,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: false,
+    });
+
+    const stBefore = getLatestState(teacherSock);
+    const turnOwner = students.find((s) => s.playerId === stBefore.activePlayerId)!;
+    const otherStu = students.find((s) => s.playerId !== stBefore.activePlayerId)!;
+
+    // TurnOwner se desconecta mientras es SU turno
+    await harness.closeSocket(room.roomCode, turnOwner.sock);
+    const stWhileDisconnected = getLatestState(teacherSock);
+    expect(stWhileDisconnected.activePlayerId).toBe(turnOwner.playerId);
+
+    // El otro alumno NO puede robarle el turno mientras está desconectado
+    await harness.sendWs(room.roomCode, otherStu.sock, {
+      type: 'ROLL_DICE',
+      actionId: 'p11_steal_disconnected',
+      playerId: otherStu.playerId,
+      playerToken: otherStu.playerToken,
+    });
+    expect(otherStu.sock.messagesOfType('ERROR').slice(-1)[0]!.code).toBe('NOT_YOUR_TURN');
+
+    // TurnOwner vuelve a conectarse y conserva su turno exacto
+    const reconnectedSock = await harness.connectSocket(room.roomCode, {
+      type: 'JOIN_ROOM',
+      actionId: 'p11_reconnect',
+      playerId: turnOwner.playerId,
+      playerName: turnOwner.playerName,
+      playerToken: turnOwner.playerToken,
+    });
+    expect(getLatestState(reconnectedSock).activePlayerId).toBe(turnOwner.playerId);
+
+    await harness.sendWs(room.roomCode, reconnectedSock, {
+      type: 'ROLL_DICE',
+      actionId: 'p11_roll_after_reconnect',
+      playerId: turnOwner.playerId,
+      playerToken: turnOwner.playerToken,
+    });
+    expect(reconnectedSock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+  });
+
+  it('PRUEBA 12: Dos peticiones ROLL_DICE simultáneas con el mismo actionId -> un único lanzamiento', async () => {
+    const { harness, room, teacherSock, students } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    const sameActionPayload = {
+      type: 'ROLL_DICE' as const,
+      actionId: 'p12_same_action_999',
+      playerId: room.playerId,
+      playerToken: room.playerToken,
+    };
+
+    // Disparo simultáneo por WebSocket + HTTP con idéntico actionId
+    const [httpRes1, httpRes2] = await Promise.all([
+      harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify(sameActionPayload),
+      }),
+      harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify(sameActionPayload),
+      }),
+    ]);
+
+    expect(httpRes1.status).toBe(200);
+    expect(httpRes2.status).toBe(200);
+    const j1 = (await httpRes1.json()) as {
+      deduplicated?: boolean;
+      event: Extract<ServerToClientMessage, { type: 'DICE_ROLLED' }>;
+    };
+    const j2 = (await httpRes2.json()) as {
+      deduplicated?: boolean;
+      event: Extract<ServerToClientMessage, { type: 'DICE_ROLLED' }>;
+    };
+    expect([j1.deduplicated, j2.deduplicated].sort()).toEqual([false, true]);
+    expect(j1.event.roll.total).toBe(j2.event.roll.total);
+    // Solo se difundió UN evento DICE_ROLLED a los sockets conectados
+    expect(teacherSock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+    expect(students[0].sock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+
+    // Reenvío WS simultáneo posterior con el mismo actionId tampoco lanza otra vez
+    await Promise.all([
+      harness.sendWs(room.roomCode, teacherSock, sameActionPayload),
+      harness.sendWs(room.roomCode, teacherSock, sameActionPayload),
+    ]);
+    expect(students[0].sock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+  });
+});

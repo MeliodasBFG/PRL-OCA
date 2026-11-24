@@ -205,6 +205,7 @@ export function createInitialRoomState(
     players: [],
     teams: buildTeamsForConfig(config),
     activeTeamIndex: 0,
+    activePlayerId: null,
     turnNumber: 1,
     phase: 'waiting_roll',
     lastDiceRoll: null,
@@ -460,6 +461,9 @@ export function joinPlayerToState(
 
   state.players.push(newPlayer);
   refreshAllTeamRoles(state);
+  if (state.status === 'playing') {
+    syncActivePlayerTurn(state);
+  }
   state.logs.unshift(
     createLog(
       'system',
@@ -545,6 +549,39 @@ export function secureRandomDie(): number {
   return Math.floor(Math.random() * 6) + 1;
 }
 
+export function resolveActivePlayerForTeam(
+  state: GameRoomState,
+  team: Team | undefined
+): string | null {
+  if (!team) return null;
+  const members = state.players.filter(
+    (p) => p.teamId === team.id && isPlayerCountedAsParticipant(p)
+  );
+  if (members.length === 0) return null;
+  const idx = ((team.roleRotationOffset ?? 0) % members.length + members.length) % members.length;
+  return members[idx]?.id ?? null;
+}
+
+export function syncActivePlayerTurn(state: GameRoomState): void {
+  const activeTeam = state.teams[state.activeTeamIndex];
+  if (!activeTeam) {
+    state.activePlayerId = null;
+    return;
+  }
+  const currentOwnerStillValid = Boolean(
+    state.activePlayerId &&
+      state.players.some(
+        (p) =>
+          p.id === state.activePlayerId &&
+          p.teamId === activeTeam.id &&
+          isPlayerCountedAsParticipant(p)
+      )
+  );
+  if (!currentOwnerStillValid) {
+    state.activePlayerId = resolveActivePlayerForTeam(state, activeTeam);
+  }
+}
+
 export function canPlayerActOnTeamTurn(
   state: GameRoomState,
   playerId: string
@@ -553,13 +590,17 @@ export function canPlayerActOnTeamTurn(
   errorCode?: 'ROOM_NOT_PLAYING' | 'INVALID_TEAM' | 'PLAYER_NOT_FOUND' | 'NOT_YOUR_TURN';
   reason?: string;
   activeTeam?: Team;
+  activePlayerId?: string | null;
   player?: Player;
 } {
   if (state.status !== 'playing') {
     return {
       allowed: false,
       errorCode: 'ROOM_NOT_PLAYING',
-      reason: 'La partida no está en curso.',
+      reason:
+        state.status === 'paused'
+          ? 'La partida está pausada por el docente.'
+          : 'La partida no está en curso.',
     };
   }
 
@@ -592,20 +633,38 @@ export function canPlayerActOnTeamTurn(
     };
   }
 
-  // Only a supervising admin teacher (!participatesAsPlayer) can trigger turns from the classroom view.
-  // Any student (or teacher participating as a player) can ONLY act during their own team's turn.
-  const isSupervisingTeacher = Boolean(player.isTeacher && !player.participatesAsPlayer);
-  if (!isSupervisingTeacher && player.teamId !== activeTeam.id) {
+  // Must own a valid board token (teacher without participatesAsPlayer=true is moderator-only, no token)
+  const hasAssignedToken =
+    isPlayerCountedAsParticipant(player) && state.teams.some((t) => t.id === player.teamId);
+  if (!hasAssignedToken) {
     return {
       allowed: false,
       errorCode: 'NOT_YOUR_TURN',
-      reason: `No es tu turno. Es el turno del ${activeTeam.name}.`,
+      reason: `No tienes ficha de juego asignada. Es el turno del ${activeTeam.name}.`,
       activeTeam,
       player,
     };
   }
 
-  return { allowed: true, activeTeam, player };
+  // Strictly require matching team AND exact active playerId (NEVER allow teacher or teammate bypass)
+  const expectedPlayerId = state.activePlayerId ?? resolveActivePlayerForTeam(state, activeTeam);
+  if (player.teamId !== activeTeam.id || !expectedPlayerId || player.id !== expectedPlayerId) {
+    const ownerName = expectedPlayerId
+      ? state.players.find((p) => p.id === expectedPlayerId)?.name
+      : undefined;
+    return {
+      allowed: false,
+      errorCode: 'NOT_YOUR_TURN',
+      reason: ownerName
+        ? `No es tu turno. Es el turno de ${ownerName} (${activeTeam.name}).`
+        : `No es tu turno. Es el turno del ${activeTeam.name}.`,
+      activeTeam,
+      activePlayerId: expectedPlayerId,
+      player,
+    };
+  }
+
+  return { allowed: true, activeTeam, activePlayerId: expectedPlayerId, player };
 }
 
 export function rollDiceServerSide(
@@ -620,13 +679,13 @@ export function rollDiceServerSide(
   roll?: DiceRollResult;
 } {
   if (state.status !== 'playing') {
-    return { ok: false, errorCode: 'ROOM_NOT_PLAYING', error: 'La partida no está en curso.' };
-  }
-  if (state.phase !== 'waiting_roll') {
     return {
       ok: false,
-      errorCode: 'INVALID_PHASE',
-      error: 'No es el momento de lanzar los dados.',
+      errorCode: 'ROOM_NOT_PLAYING',
+      error:
+        state.status === 'paused'
+          ? 'La partida está pausada por el docente.'
+          : 'La partida no está en curso.',
     };
   }
 
@@ -636,6 +695,14 @@ export function rollDiceServerSide(
       ok: false,
       errorCode: turnAuth.errorCode ?? 'NOT_YOUR_TURN',
       error: turnAuth.reason ?? 'No puedes lanzar el dado en este turno.',
+    };
+  }
+
+  if (state.phase !== 'waiting_roll') {
+    return {
+      ok: false,
+      errorCode: 'INVALID_PHASE',
+      error: 'Ya se realizó el lanzamiento en este turno; espera al siguiente turno.',
     };
   }
 
@@ -1064,14 +1131,23 @@ export function advanceTurnServerSide(state: GameRoomState): void {
   const hasExtraRoll = Boolean(landedTile?.specialEffect?.extraRoll);
 
   if (hasExtraRoll && currentTeam) {
-    currentTeam.roleRotationOffset += 1;
     refreshAllTeamRoles(state);
+    state.activePlayerId =
+      state.activePlayerId &&
+      state.players.some(
+        (p) =>
+          p.id === state.activePlayerId &&
+          p.teamId === currentTeam.id &&
+          isPlayerCountedAsParticipant(p)
+      )
+        ? state.activePlayerId
+        : resolveActivePlayerForTeam(state, currentTeam);
     state.phase = 'waiting_roll';
     state.activeChallenge = null;
     state.logs.unshift(
       createLog(
         'turn' as GameLogEvent['type'],
-        `¡Tirada extra preventiva para ${currentTeam.name}! Los roles internos rotan para la nueva tirada.`,
+        `¡Tirada extra preventiva para ${currentTeam.name}!`,
         currentTeam.id
       )
     );
@@ -1083,19 +1159,18 @@ export function advanceTurnServerSide(state: GameRoomState): void {
     currentTeam.roleRotationOffset += 1;
   }
 
-  // Move to next active team (in individual mode skip empty unassigned slots)
+  // Move to next active team (skip empty teams when at least 2 teams have participants, or in individual mode)
   const teamCount = state.teams.length;
-  const hasOccupiedTeams =
-    state.config.mode === 'individual' &&
-    state.teams.some((t) =>
-      state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
-    );
+  const occupiedTeamsCount = state.teams.filter((t) =>
+    state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
+  ).length;
+  const shouldSkipEmptyTeams = state.config.mode === 'individual' || occupiedTeamsCount >= 2;
 
   let nextIdx = (state.activeTeamIndex + 1) % teamCount;
   if (nextIdx === 0) {
     state.turnNumber += 1;
   }
-  if (hasOccupiedTeams) {
+  if (shouldSkipEmptyTeams && occupiedTeamsCount > 0) {
     for (let step = 0; step < teamCount; step++) {
       const candidate = state.teams[nextIdx];
       const occupied = Boolean(
@@ -1115,11 +1190,17 @@ export function advanceTurnServerSide(state: GameRoomState): void {
   state.phase = 'waiting_roll';
   state.activeChallenge = null;
   const nextTeam = state.teams[state.activeTeamIndex];
+  state.activePlayerId = resolveActivePlayerForTeam(state, nextTeam);
+  const nextPlayerName = state.activePlayerId
+    ? state.players.find((p) => p.id === state.activePlayerId)?.name
+    : undefined;
   if (nextTeam) {
     state.logs.unshift(
       createLog(
         'system',
-        `Turno #${state.turnNumber}: le toca al ${nextTeam.name} (Casilla ${nextTeam.position}).`,
+        nextPlayerName
+          ? `Turno #${state.turnNumber}: le toca a ${nextPlayerName} (${nextTeam.name}, Casilla ${nextTeam.position}).`
+          : `Turno #${state.turnNumber}: le toca al ${nextTeam.name} (Casilla ${nextTeam.position}).`,
         nextTeam.id
       )
     );
@@ -1220,13 +1301,14 @@ export function executeTeacherCommandServerSide(
       state.phase = 'waiting_roll';
       state.startedAt = now;
       state.turnNumber = 1;
-      const firstOccupiedIdx =
-        state.config.mode === 'individual'
-          ? state.teams.findIndex((t) =>
-              state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
-            )
-          : 0;
+      const firstOccupiedIdx = state.teams.findIndex((t) =>
+        state.players.some((p) => p.teamId === t.id && isPlayerCountedAsParticipant(p))
+      );
       state.activeTeamIndex = firstOccupiedIdx >= 0 ? firstOccupiedIdx : 0;
+      state.activePlayerId = resolveActivePlayerForTeam(
+        state,
+        state.teams[state.activeTeamIndex]
+      );
       state.winnerTeamId = null;
       refreshAllTeamRoles(state);
       state.logs.unshift(
@@ -1287,6 +1369,7 @@ export function executeTeacherCommandServerSide(
       if (player && team) {
         player.teamId = team.id;
         refreshAllTeamRoles(state);
+        syncActivePlayerTurn(state);
         state.logs.unshift(
           createLog('teacher', `Docente asignó a ${player.name} al ${team.name}.`, team.id)
         );
@@ -1310,6 +1393,7 @@ export function executeTeacherCommandServerSide(
       if (idx !== -1) {
         const removed = state.players.splice(idx, 1)[0];
         refreshAllTeamRoles(state);
+        syncActivePlayerTurn(state);
         state.logs.unshift(
           createLog('teacher', `Docente retiró al participante ${removed.name} de la sala.`)
         );
@@ -1447,12 +1531,13 @@ export function executeTeacherCommandServerSide(
             command.partialConfig.mode !== prevMode)
         ) {
           state.teams = buildTeamsForConfig(state.config);
-          // Reassign players evenly across new teams
-          const participants = state.players.filter((p) => !p.isTeacher && !p.isSpectator);
+          // Reassign participants evenly across new teams
+          const participants = state.players.filter(isPlayerCountedAsParticipant);
           participants.forEach((p, idx) => {
             p.teamId = state.teams[idx % state.teams.length]?.id ?? 'team_1';
           });
           refreshAllTeamRoles(state);
+          syncActivePlayerTurn(state);
         }
         state.logs.unshift(
           createLog('teacher', 'El docente actualizó los parámetros de configuración de la partida.')

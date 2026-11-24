@@ -376,7 +376,7 @@ describe('Identidad Unificada de Participantes, Contabilización y Autorización
     expect(rolledMsgs[0].roll.dice.length).toBeGreaterThanOrEqual(1);
     expect(rolledMsgs[0].roll.rolledByPlayerId).toBe(roomData.playerId);
 
-    // También comprobar profesor estándar (participatesAsPlayer=false) lanzando dado vía HTTP /action
+    // En modo moderador sin ficha (participatesAsPlayer=false), el docente NO puede robar el turno del alumno
     const { data: adminRoom } = await createRoomViaHttp(harness);
     const { data: adminStu } = await joinRoomViaHttp(harness, adminRoom.roomCode, {
       playerName: 'Alumno AdminTest',
@@ -407,9 +407,10 @@ describe('Identidad Unificada de Participantes, Contabilización y Autorización
         playerToken: adminRoom.playerToken,
       }),
     });
-    expect(adminRollHttp.status).toBe(200);
+    expect(adminRollHttp.status).toBe(409);
     const adminRollJson = (await adminRollHttp.json()) as { ok: boolean; error?: string };
-    expect(adminRollJson.ok).toBe(true);
+    expect(adminRollJson.ok).toBe(false);
+    expect(adminRollJson.error).toBe('NOT_YOUR_TURN');
   });
 
   it('PRUEBA 5: Alumno autorizado lanza dado en su turno y se retransmite DICE_ROLLED a todos los clientes', async () => {
@@ -516,7 +517,7 @@ describe('Identidad Unificada de Participantes, Contabilización y Autorización
 
     const err = outOfTurn.sock.messagesOfType('ERROR').slice(-1)[0];
     expect(err).toBeDefined();
-    expect(err?.message).toContain('Es el turno del');
+    expect(err?.message).toContain('Es el turno de');
     expect(err?.message).not.toContain('no reconocido');
     expect(outOfTurn.sock.messagesOfType('DICE_ROLLED')).toHaveLength(0);
 
@@ -524,7 +525,7 @@ describe('Identidad Unificada de Participantes, Contabilización y Autorización
     useGameStore.setState({ isRollingAnimation: true, errorMessage: null });
     useGameStore.getState().applyServerMessage(err!);
     expect(useGameStore.getState().isRollingAnimation).toBe(false);
-    expect(useGameStore.getState().errorMessage).toContain('Es el turno del');
+    expect(useGameStore.getState().errorMessage).toContain('Es el turno de');
   });
 
   it('PRUEBA 7: Alumno desconectado vuelve a entrar y recupera identidad, token y equipo sin duplicarse', async () => {
