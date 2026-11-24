@@ -1318,6 +1318,15 @@ export class GameRoom {
             includeState: true,
           };
         }
+        if (state.phase !== 'showing_feedback') {
+          return {
+            ok: false,
+            status: 409,
+            code: 'INVALID_PHASE',
+            message: 'Este turno ya avanzó o aún no ha finalizado la casilla actual.',
+            includeState: true,
+          };
+        }
         advanceTurnServerSide(state);
         return finalizeSuccess({ type: 'STATE_SYNC', state });
       }

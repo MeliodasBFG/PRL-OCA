@@ -201,8 +201,13 @@ export class MultiplayerClient {
 
   public send(msg: ClientToServerMessage): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
-      return true;
+      try {
+        this.ws.send(JSON.stringify(msg));
+        return true;
+      } catch (err) {
+        console.warn('[PRL-OCA][WS] Error enviando mensaje por WebSocket; usando respaldo HTTP', err);
+        return false;
+      }
     }
     return false;
   }

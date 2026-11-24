@@ -176,11 +176,18 @@ export const GameScreen: React.FC = () => {
     };
   }, []);
 
+  const shouldClearInspector = Boolean(
+    isRollingAnimation ||
+      isTokenMoving ||
+      roomState?.phase === 'showing_feedback' ||
+      roomState?.activeChallenge
+  );
+
   useEffect(() => {
-    if (isRollingAnimation) {
+    if (shouldClearInspector) {
       setInspectedTile(null);
     }
-  }, [isRollingAnimation]);
+  }, [shouldClearInspector]);
 
   if (!roomState) return null;
 
@@ -203,10 +210,14 @@ export const GameScreen: React.FC = () => {
     : undefined;
 
   const anyModalOpen = Boolean(
-    (roomState.activeChallenge &&
+    (roomState.phase === 'showing_feedback' &&
       challengeModalReady &&
       !isRollingAnimation &&
       !isTokenMoving) ||
+      (roomState.activeChallenge &&
+        challengeModalReady &&
+        !isRollingAnimation &&
+        !isTokenMoving) ||
       showTeacherPanel ||
       showQRModal ||
       showSettingsModal ||
@@ -419,25 +430,40 @@ export const GameScreen: React.FC = () => {
           challengeModalReady &&
           !isRollingAnimation &&
           !isTokenMoving && (
-            <div className="special-tile-feedback-card modal-animate-in">
-              <div className="special-card-head">
-                <Sparkles size={22} className="text-yellow" />
-                <h3>¡Casilla Especial Activada: {currentTile.name}!</h3>
+            <div
+              className="special-tile-feedback-layer"
+              role="dialog"
+              aria-modal="true"
+              aria-label={`Casilla Especial Activada: ${currentTile.name}`}
+            >
+              <div className="special-tile-feedback-card modal-animate-in">
+                <div className="special-card-head">
+                  <Sparkles size={22} className="text-yellow" />
+                  <h3>¡Casilla Especial Activada: {currentTile.name}!</h3>
+                </div>
+                <p>
+                  {roomState.lastDiceRoll?.specialExplanation ??
+                    currentTile.specialEffect?.explanation ??
+                    currentTile.subtitle}
+                </p>
+                {isMyTurn ? (
+                  <button
+                    type="button"
+                    className="btn-primary btn-lg special-continue-btn"
+                    onClick={nextTurn}
+                  >
+                    <FastForward size={18} /> Continuar Recorrido
+                  </button>
+                ) : (
+                  <button type="button" className="btn-secondary btn-lg" disabled>
+                    Esperando a{' '}
+                    {activePlayer
+                      ? `${activePlayer.name} (${activeTeam?.name.split('(')[0].trim()})`
+                      : activeTeam?.name.split('(')[0].trim()}
+                    ...
+                  </button>
+                )}
               </div>
-              <p>
-                {roomState.lastDiceRoll?.specialExplanation ??
-                  currentTile.specialEffect?.explanation ??
-                  currentTile.subtitle}
-              </p>
-              {isMyTurn ? (
-                <button type="button" className="btn-primary btn-lg" onClick={nextTurn}>
-                  <FastForward size={18} /> Continuar Recorrido
-                </button>
-              ) : (
-                <button type="button" className="btn-secondary btn-lg" disabled>
-                  Esperando a {activeTeam?.name.split('(')[0].trim()}...
-                </button>
-              )}
             </div>
           )}
 

@@ -51,8 +51,17 @@ const PREFS_STORAGE_KEY = 'prl_oca_visual_prefs_v1';
 
 let walkFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 let arrivalRevealTimer: ReturnType<typeof setTimeout> | null = null;
+let wsActionFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearPendingWsActionFallback(): void {
+  if (wsActionFallbackTimer) {
+    clearTimeout(wsActionFallbackTimer);
+    wsActionFallbackTimer = null;
+  }
+}
 
 function clearMovementTimers(): void {
+  clearPendingWsActionFallback();
   if (walkFallbackTimer) {
     clearTimeout(walkFallbackTimer);
     walkFallbackTimer = null;
@@ -320,6 +329,33 @@ export const useGameStore = create<GameStore>((set, get) => {
   const inFlightSlotActions = new Set<string>();
   const pendingSlotActionIds = new Map<string, string>();
 
+  const buildRollSlotKey = (room: GameRoomState): string =>
+    `${normalizeRoomCode(room.roomCode)}:${room.turnNumber}:${room.lastDiceRoll?.timestamp ?? 0}:waiting_roll:ROLL_DICE`;
+
+  const buildAnswerSlotKey = (
+    room: GameRoomState,
+    actionType: 'SUBMIT_ANSWER' | 'COMPLETE_CHALLENGE_3D'
+  ): string => {
+    const epoch = room.activeChallenge?.startedAt ?? room.lastDiceRoll?.timestamp ?? 0;
+    return `${normalizeRoomCode(room.roomCode)}:${room.turnNumber}:${epoch}:${actionType}`;
+  };
+
+  const buildNextTurnSlotKey = (room: GameRoomState): string => {
+    const rollEpoch = room.lastDiceRoll?.timestamp ?? 0;
+    const challengeEpoch = room.activeChallenge?.startedAt ?? 0;
+    return `${normalizeRoomCode(room.roomCode)}:${room.turnNumber}:${rollEpoch}:${challengeEpoch}:${room.phase}:NEXT_TURN`;
+  };
+
+  const clearPendingRoomSlots = (roomCode: string, actionSuffixes?: string[]): void => {
+    const prefix = `${normalizeRoomCode(roomCode)}:`;
+    for (const key of Array.from(pendingSlotActionIds.keys())) {
+      if (!key.startsWith(prefix)) continue;
+      if (!actionSuffixes || actionSuffixes.some((suffix) => key.endsWith(`:${suffix}`))) {
+        pendingSlotActionIds.delete(key);
+      }
+    }
+  };
+
   const getOrCreateIdempotentActionId = (slotKey: string, prefix: string): string => {
     const existing = pendingSlotActionIds.get(slotKey);
     if (existing) return existing;
@@ -450,6 +486,57 @@ export const useGameStore = create<GameStore>((set, get) => {
     } finally {
       inFlightSlotActions.delete(slotKey);
     }
+  };
+
+  const buildRoomProgressEpoch = (room: GameRoomState): string =>
+    `${room.turnNumber}:${room.phase}:${room.lastDiceRoll?.timestamp ?? 0}:${
+      room.activeTeamIndex
+    }:${room.activePlayerId ?? ''}:${Boolean(room.activeChallenge?.answered)}`;
+
+  const dispatchRemoteActionWithFallback = (params: {
+    state: GameRoomState;
+    slotKey: string;
+    actionLabel: string;
+    msg: GameplayClientMsg;
+  }): boolean => {
+    const { state, slotKey, actionLabel, msg } = params;
+    const isRemote = get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled();
+    const originEpoch = buildRoomProgressEpoch(state);
+
+    if (mpClient.isConnected() && get().connectionStatus === 'connected') {
+      if (mpClient.send(msg)) {
+        if (isRemote) {
+          clearPendingWsActionFallback();
+          wsActionFallbackTimer = setTimeout(() => {
+            const latest = get().roomState;
+            if (!latest) return;
+            if (buildRoomProgressEpoch(latest) === originEpoch && !inFlightSlotActions.has(slotKey)) {
+              mpClient.forceReconnectIfNeeded();
+              void sendRemoteGameplayAction({
+                roomCode: latest.roomCode,
+                slotKey,
+                actionLabel,
+                msg,
+              });
+            }
+          }, 1800);
+        }
+        return true;
+      }
+    }
+
+    if (isRemote) {
+      mpClient.forceReconnectIfNeeded();
+      void sendRemoteGameplayAction({
+        roomCode: state.roomCode,
+        slotKey,
+        actionLabel,
+        msg,
+      });
+      return true;
+    }
+
+    return false;
   };
 
   const revealChallengeAfterArrival = () => {
@@ -595,6 +682,7 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const prevStatus = get().roomState?.status;
       clearMovementTimers();
+      clearPendingRoomSlots(incomingCode);
       console.info(
         `[PRL-OCA][Sync] GAME_STARTED handled for room=${incomingCode} startedAt=${msg.startedAt} turn=${msg.state.turnNumber}`
       );
@@ -623,9 +711,35 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const prevStatus = get().roomState?.status;
-      const prevRollTs = get().roomState?.lastDiceRoll?.timestamp ?? 0;
+      clearPendingWsActionFallback();
+      const prevRoom = get().roomState;
+      const prevStatus = prevRoom?.status;
+      const prevRollTs = prevRoom?.lastDiceRoll?.timestamp ?? 0;
       const incomingRollTs = msg.state.lastDiceRoll?.timestamp ?? 0;
+      const turnOrPhaseAdvanced =
+        !prevRoom ||
+        prevRoom.phase !== msg.state.phase ||
+        prevRoom.turnNumber !== msg.state.turnNumber ||
+        prevRoom.activeTeamIndex !== msg.state.activeTeamIndex ||
+        prevRoom.activePlayerId !== msg.state.activePlayerId ||
+        prevRollTs !== incomingRollTs;
+
+      if (turnOrPhaseAdvanced) {
+        clearPendingRoomSlots(incomingCode, [
+          'NEXT_TURN',
+          'SUBMIT_ANSWER',
+          'COMPLETE_CHALLENGE_3D',
+        ]);
+        if (msg.state.phase === 'waiting_roll') {
+          const activeRollKey = buildRollSlotKey(msg.state);
+          for (const key of Array.from(pendingSlotActionIds.keys())) {
+            if (key.startsWith(`${incomingCode}:`) && key.endsWith(':ROLL_DICE') && key !== activeRollKey) {
+              pendingSlotActionIds.delete(key);
+            }
+          }
+        }
+      }
+
       const hasNewRollFromSync =
         incomingRollTs > prevRollTs && msg.state.phase === 'answering';
 
@@ -674,12 +788,16 @@ export const useGameStore = create<GameStore>((set, get) => {
         void enterGameLandscapeMode();
       }
     } else if (msg.type === 'DICE_ROLLED') {
+      clearPendingWsActionFallback();
       const latestRoom = get().roomState;
-      const rollSlotKey = latestRoom
-        ? `${normalizeRoomCode(latestRoom.roomCode)}:${latestRoom.turnNumber}:waiting_roll:ROLL_DICE`
-        : '';
-      if (rollSlotKey) {
-        pendingSlotActionIds.delete(rollSlotKey);
+      const activeRoomCode = msg.state.roomCode || latestRoom?.roomCode;
+      if (activeRoomCode) {
+        clearPendingRoomSlots(activeRoomCode, [
+          'ROLL_DICE',
+          'SUBMIT_ANSWER',
+          'COMPLETE_CHALLENGE_3D',
+          'NEXT_TURN',
+        ]);
       }
       // Prevent double animation if the same roll arrives over both WS broadcast and HTTP response
       if (
@@ -699,6 +817,10 @@ export const useGameStore = create<GameStore>((set, get) => {
       });
       scheduleMovementSequence(msg.state);
     } else if (msg.type === 'ANSWER_RESULT') {
+      clearPendingWsActionFallback();
+      if (msg.state.roomCode) {
+        clearPendingRoomSlots(msg.state.roomCode, ['SUBMIT_ANSWER', 'COMPLETE_CHALLENGE_3D']);
+      }
       soundEngine.playSfx(msg.isCorrect ? 'answer_correct' : 'answer_wrong');
       if (msg.unlockedBadges.length > 0) {
         setTimeout(() => soundEngine.playSfx('badge_unlock'), 350);
@@ -715,11 +837,16 @@ export const useGameStore = create<GameStore>((set, get) => {
         challengeModalReady: true,
       });
     } else if (msg.type === 'ERROR') {
+      clearPendingWsActionFallback();
       const formattedErr = mapRoomErrorMessage(msg.code, msg.message);
       const roomCodeNow = get().roomState?.roomCode;
       if (roomCodeNow) {
-        const turnNow = get().roomState?.turnNumber ?? 1;
-        pendingSlotActionIds.delete(`${normalizeRoomCode(roomCodeNow)}:${turnNow}:waiting_roll:ROLL_DICE`);
+        clearPendingRoomSlots(roomCodeNow, [
+          'ROLL_DICE',
+          'SUBMIT_ANSWER',
+          'COMPLETE_CHALLENGE_3D',
+          'NEXT_TURN',
+        ]);
       }
       console.error('[PRL-OCA][WS][ERROR]', { code: msg.code, message: msg.message });
       const shouldLeaveToJoin =
@@ -1528,7 +1655,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const rollSlotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:waiting_roll:ROLL_DICE`;
+      const rollSlotKey = buildRollSlotKey(state);
       if (inFlightSlotActions.has(rollSlotKey)) {
         return;
       }
@@ -1554,7 +1681,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           return;
         }
 
-        const slotKey = `${normalizeRoomCode(curRoom.roomCode)}:${curRoom.turnNumber}:waiting_roll:ROLL_DICE`;
+        const slotKey = buildRollSlotKey(curRoom);
         const msg = {
           type: 'ROLL_DICE' as const,
           actionId: getOrCreateIdempotentActionId(slotKey, 'roll'),
@@ -1627,7 +1754,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
-      const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:SUBMIT_ANSWER`;
+      const slotKey = buildAnswerSlotKey(state, 'SUBMIT_ANSWER');
       const msg = {
         type: 'SUBMIT_ANSWER' as const,
         actionId: getOrCreateIdempotentActionId(slotKey, 'ans'),
@@ -1636,18 +1763,14 @@ export const useGameStore = create<GameStore>((set, get) => {
         collaborated,
         playerToken: pToken,
       };
-      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
-        if (mpClient.send(msg)) return;
-      }
-
-      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        mpClient.forceReconnectIfNeeded();
-        void sendRemoteGameplayAction({
-          roomCode: state.roomCode,
+      if (
+        dispatchRemoteActionWithFallback({
+          state,
           slotKey,
           actionLabel: 'enviar la respuesta',
           msg,
-        });
+        })
+      ) {
         return;
       }
 
@@ -1695,7 +1818,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       }
 
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
-      const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:COMPLETE_CHALLENGE_3D`;
+      const slotKey = buildAnswerSlotKey(state, 'COMPLETE_CHALLENGE_3D');
       const msg = {
         type: 'COMPLETE_CHALLENGE_3D' as const,
         actionId: getOrCreateIdempotentActionId(slotKey, 'ch3d'),
@@ -1703,18 +1826,14 @@ export const useGameStore = create<GameStore>((set, get) => {
         selectedHotspotIds,
         playerToken: pToken,
       };
-      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
-        if (mpClient.send(msg)) return;
-      }
-
-      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        mpClient.forceReconnectIfNeeded();
-        void sendRemoteGameplayAction({
-          roomCode: state.roomCode,
+      if (
+        dispatchRemoteActionWithFallback({
+          state,
           slotKey,
           actionLabel: 'validar el desafío 3D',
           msg,
-        });
+        })
+      ) {
         return;
       }
 
@@ -1748,27 +1867,24 @@ export const useGameStore = create<GameStore>((set, get) => {
       clearMovementTimers();
       soundEngine.playSfx('button_click');
       soundEngine.playMusic('board');
+      set({ errorMessage: null });
 
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
-      const slotKey = `${normalizeRoomCode(state.roomCode)}:${state.turnNumber}:${state.phase}:NEXT_TURN`;
+      const slotKey = buildNextTurnSlotKey(state);
       const msg = {
         type: 'NEXT_TURN' as const,
         actionId: getOrCreateIdempotentActionId(slotKey, 'nxt'),
         playerId,
         playerToken: pToken,
       };
-      if (mpClient.isConnected() && get().connectionStatus === 'connected') {
-        if (mpClient.send(msg)) return;
-      }
-
-      if (get().isRemoteSession || isProductionEnvironment() || !isLocalFallbackEnabled()) {
-        mpClient.forceReconnectIfNeeded();
-        void sendRemoteGameplayAction({
-          roomCode: state.roomCode,
+      if (
+        dispatchRemoteActionWithFallback({
+          state,
           slotKey,
           actionLabel: 'avanzar al siguiente turno',
           msg,
-        });
+        })
+      ) {
         return;
       }
 

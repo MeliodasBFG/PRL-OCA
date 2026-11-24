@@ -7,6 +7,7 @@ import {
 } from '@prl-oca/shared';
 import workerEntry, { GameRoom } from '../apps/realtime/src/index';
 import { useGameStore } from '../apps/web/src/stores/useGameStore';
+import { mpClient } from '../apps/web/src/multiplayer/wsClient';
 
 const PROD_ORIGIN = 'https://prl-oca.pages.dev';
 const WORKER_URL = 'https://realtime.danielcalvinoouro.workers.dev';
@@ -806,5 +807,197 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
       harness.sendWs(room.roomCode, teacherSock, sameActionPayload),
     ]);
     expect(students[0].sock.messagesOfType('DICE_ROLLED')).toHaveLength(1);
+  });
+
+  it('PRUEBA 13: Casillas especiales encadenadas (Oca 5->11 y 17->23) en el mismo turnNumber no bloquean Continuar Recorrido ni reutilizan actionId', async () => {
+    const { harness, room, teacherSock } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    const sentActionIds: string[] = [];
+    const sendSpy = vi.spyOn(mpClient, 'send').mockImplementation((msg) => {
+      if ('actionId' in msg) sentActionIds.push(msg.actionId);
+      void harness.sendWs(room.roomCode, teacherSock, msg).then(() => {
+        const latestMsg = teacherSock.inbox[teacherSock.inbox.length - 1];
+        if (latestMsg) {
+          useGameStore.getState().applyServerMessage(latestMsg);
+        }
+      });
+      return true;
+    });
+    const isConnSpy = vi.spyOn(mpClient, 'isConnected').mockReturnValue(true);
+
+    try {
+      // Oca #1 en turnNumber=1: sacar 4 desde casilla 1 -> casilla 5 -> redirige a 11 (showing_feedback, extraRoll=true)
+      const dieSpy = vi
+        .spyOn(globalThis.crypto, 'getRandomValues')
+        .mockImplementationOnce((arr) => {
+          (arr as Uint32Array)[0] = 3; // (3 % 6) + 1 = 4 -> tile 1 + 4 = 5 (Oca -> 11)
+          return arr;
+        });
+
+      const r1 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify({
+          type: 'ROLL_DICE',
+          actionId: 'p13_roll_oca_1',
+          playerId: room.playerId,
+          playerToken: room.playerToken,
+        }),
+      });
+      expect(r1.status).toBe(200);
+      const j1 = (await r1.json()) as { state: GameRoomState };
+      expect(j1.state.phase).toBe('showing_feedback');
+      expect(j1.state.teams[0].position).toBe(11);
+
+      useGameStore.setState({
+        screen: 'game',
+        isRemoteSession: true,
+        connectionStatus: 'connected',
+        playerId: room.playerId,
+        playerToken: room.playerToken,
+        isTeacher: true,
+        isSpectator: false,
+        roomState: structuredClone(j1.state),
+        isRollingAnimation: false,
+        isTokenMoving: false,
+        challengeModalReady: true,
+        errorMessage: null,
+      });
+
+      // 1a pulsación de "Continuar Recorrido" en turnNumber=1 -> phase vuelve a waiting_roll y turnNumber sigue siendo 1
+      useGameStore.getState().nextTurn();
+      await vi.waitFor(() => {
+        expect(useGameStore.getState().roomState?.phase).toBe('waiting_roll');
+      });
+      expect(useGameStore.getState().roomState?.turnNumber).toBe(1);
+      expect(sentActionIds).toHaveLength(1);
+
+      // Oca #2 en el MISMO turnNumber=1: sacar 6 desde casilla 11 -> 17 -> redirige a 23 (mismo caso que la captura del usuario)
+      dieSpy.mockImplementationOnce((arr) => {
+        (arr as Uint32Array)[0] = 5; // (5 % 6) + 1 = 6 -> tile 11 + 6 = 17 (Oca -> 23)
+        return arr;
+      });
+      const r2 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify({
+          type: 'ROLL_DICE',
+          actionId: 'p13_roll_oca_2',
+          playerId: room.playerId,
+          playerToken: room.playerToken,
+        }),
+      });
+      expect(r2.status).toBe(200);
+      const j2 = (await r2.json()) as { state: GameRoomState };
+      expect(j2.state.phase).toBe('showing_feedback');
+      expect(j2.state.teams[0].position).toBe(23);
+      expect(j2.state.turnNumber).toBe(1);
+      useGameStore.setState({ roomState: structuredClone(j2.state) });
+
+      // 2a pulsación de "Continuar Recorrido" en el mismo turnNumber=1
+      useGameStore.getState().nextTurn();
+      await vi.waitFor(() => {
+        expect(useGameStore.getState().roomState?.phase).toBe('waiting_roll');
+      });
+      expect(useGameStore.getState().roomState?.teams[0].position).toBe(23);
+      expect(sentActionIds).toHaveLength(2);
+      // Crítico: el segundo NEXT_TURN NUNCA puede reutilizar el actionId del primero
+      expect(sentActionIds[1]).not.toBe(sentActionIds[0]);
+
+      // 3. Enviar NEXT_TURN cuando phase ya es waiting_roll debe devolver 409 INVALID_PHASE sin saltar turno
+      const invalidNext = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+        body: JSON.stringify({
+          type: 'NEXT_TURN',
+          actionId: 'p13_invalid_phase_next',
+          playerId: room.playerId,
+          playerToken: room.playerToken,
+        }),
+      });
+      expect(invalidNext.status).toBe(409);
+      const invalidJson = (await invalidNext.json()) as { error: string; state?: GameRoomState };
+      expect(invalidJson.error).toBe('INVALID_PHASE');
+      expect(invalidJson.state?.activePlayerId).toBe(room.playerId);
+      dieSpy.mockRestore();
+    } finally {
+      sendSpy.mockRestore();
+      isConnSpy.mockRestore();
+    }
+  });
+
+  it('PRUEBA 14: WebSocket colgado al pulsar Continuar Recorrido activa respaldo HTTP automático sin quedarse bloqueado', async () => {
+    vi.useFakeTimers();
+    const { harness, room } = await setupRoom({
+      studentCount: 1,
+      mode: 'teams',
+      teamCount: 2,
+      teacherParticipatesAsPlayer: true,
+    });
+
+    const dieSpy = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementationOnce((arr) => {
+      (arr as Uint32Array)[0] = 3; // tile 1 + 4 = 5 (Oca -> 11)
+      return arr;
+    });
+    const rollRes = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Player-Token': room.playerToken },
+      body: JSON.stringify({
+        type: 'ROLL_DICE',
+        actionId: 'p14_roll_oca',
+        playerId: room.playerId,
+        playerToken: room.playerToken,
+      }),
+    });
+    dieSpy.mockRestore();
+    const rolledJson = (await rollRes.json()) as { state: GameRoomState };
+    expect(rolledJson.state.phase).toBe('showing_feedback');
+    expect(rolledJson.state.teams[0].position).toBe(11);
+
+    // Simula WS aparentemente conectado pero que descarta silenciosamente el frame (socket zombi)
+    const sendSpy = vi.spyOn(mpClient, 'send').mockReturnValue(true);
+    const isConnSpy = vi.spyOn(mpClient, 'isConnected').mockReturnValue(true);
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr = typeof input === 'string' ? input : input.toString();
+      const pathname = new URL(urlStr).pathname;
+      return harness.httpFetch(pathname, init);
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    try {
+      useGameStore.setState({
+        screen: 'game',
+        isRemoteSession: true,
+        connectionStatus: 'connected',
+        playerId: room.playerId,
+        playerToken: room.playerToken,
+        isTeacher: true,
+        isSpectator: false,
+        roomState: structuredClone(rolledJson.state),
+        isRollingAnimation: false,
+        isTokenMoving: false,
+        challengeModalReady: true,
+        errorMessage: null,
+      });
+
+      useGameStore.getState().nextTurn();
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      // Tras 1800ms sin respuesta WS, debe disparar /action por HTTP y avanzar la fase a waiting_roll
+      await vi.advanceTimersByTimeAsync(1900);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(useGameStore.getState().roomState?.phase).toBe('waiting_roll');
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      sendSpy.mockRestore();
+      isConnSpy.mockRestore();
+    }
   });
 });
