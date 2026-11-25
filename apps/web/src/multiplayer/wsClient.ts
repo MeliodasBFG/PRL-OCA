@@ -159,6 +159,16 @@ export class MultiplayerClient {
         this.clearConnectTimeout();
         this.stopPing();
         this.ws = null;
+        if (ev.code === 4003 || ev.reason === 'PLAYER_KICKED') {
+          this.intentionalClose = true;
+          this.onStatusCallback?.('disconnected');
+          this.onMessageCallback?.({
+            type: 'ERROR',
+            code: 'PLAYER_KICKED',
+            message: 'Has sido expulsado de la sala por el profesor.',
+          });
+          return;
+        }
         if (!this.intentionalClose) {
           let delay = WS_RECONNECT_DELAY_MS;
           if (!this.currentAttemptOpened && this.wsCandidates.length > 1) {

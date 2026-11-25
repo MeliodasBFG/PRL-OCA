@@ -223,6 +223,7 @@ export function createInitialRoomState(
       ),
     ],
     usedQuestionIds: [],
+    kickedPlayerIds: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -304,6 +305,14 @@ export function evaluateJoinEligibility(
       ok: false,
       errorCode: 'ROOM_CLOSED',
       error: 'Esta sala ha sido cerrada por el profesor y no admite conexiones.',
+    };
+  }
+
+  if (!wantTeacher && state.kickedPlayerIds?.includes(params.playerId)) {
+    return {
+      ok: false,
+      errorCode: 'PLAYER_KICKED',
+      error: 'Has sido expulsado de la sala por el profesor.',
     };
   }
 
@@ -484,6 +493,109 @@ export function joinPlayerToState(
   return { ok: true, player: newPlayer, reconnected: false };
 }
 
+function secureRandomInt(maxExclusive: number): number {
+  if (maxExclusive <= 1) return 0;
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const limit = Math.floor(0x100000000 / maxExclusive) * maxExclusive;
+    const arr = new Uint32Array(1);
+    while (true) {
+      crypto.getRandomValues(arr);
+      if (arr[0] < limit) {
+        return arr[0] % maxExclusive;
+      }
+    }
+  }
+  return Math.floor(Math.random() * maxExclusive);
+}
+
+function isOrderDependentTrailingOption(text: string): boolean {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return /^(?:(?:todas|ninguna)\s+(?:de\s+)?(?:las|estas)\s+anteriores\b|todas\s+(?:las\s+respuestas\s+)?son\s+(?:correctas|ciertas)\b|ninguna\s+(?:de\s+las\s+(?:dos|anteriores)|es\s+correcta)\b|ambas\s+(?:son\s+(?:correctas|ciertas)|respuestas|opciones)\b)/.test(
+    normalized
+  );
+}
+
+/**
+ * Produces an immutable shuffled copy of `question` using Fisher-Yates and stable per-option IDs.
+ * Randomization occurs once per question presentation so all connected room clients see the same order.
+ */
+export function shuffleQuestionOptions(
+  question: QuestionItem,
+  overrides?: { timeSeconds?: number; points?: number }
+): QuestionItem {
+  const hasMatchingOptionIds =
+    Array.isArray(question.optionIds) && question.optionIds.length === question.options.length;
+
+  const entries = question.options.map((text, idx) => ({
+    id: hasMatchingOptionIds ? question.optionIds![idx] : `${question.id}_opt_${idx}`,
+    text,
+  }));
+
+  const canonicalCorrectIds =
+    Array.isArray(question.correctOptionIds) && question.correctOptionIds.length > 0
+      ? [...question.correctOptionIds]
+      : question.correctIndices
+          .map((idx) => entries[idx]?.id)
+          .filter((id): id is string => Boolean(id));
+
+  let shuffleLimit = entries.length;
+  while (shuffleLimit > 1 && isOrderDependentTrailingOption(entries[shuffleLimit - 1].text)) {
+    shuffleLimit -= 1;
+  }
+
+  for (let i = shuffleLimit - 1; i > 0; i--) {
+    const j = secureRandomInt(i + 1);
+    const tmp = entries[i];
+    entries[i] = entries[j];
+    entries[j] = tmp;
+  }
+
+  const shuffledOptions = entries.map((e) => e.text);
+  const shuffledOptionIds = entries.map((e) => e.id);
+  const newCorrectIndices = canonicalCorrectIds
+    .map((cid) => shuffledOptionIds.indexOf(cid))
+    .filter((idx) => idx >= 0);
+
+  return {
+    ...question,
+    options: shuffledOptions,
+    optionIds: shuffledOptionIds,
+    correctIndices: newCorrectIndices,
+    correctOptionIds: canonicalCorrectIds,
+    timeSeconds: overrides?.timeSeconds ?? question.timeSeconds,
+    points: overrides?.points ?? question.points,
+  };
+}
+
+/**
+ * Strips correct answer identifiers/indices from serialized room snapshots while a question is unanswered.
+ * Reveals answer metadata again once `activeChallenge.answered === true`.
+ */
+export function sanitizeStateForClient(state: GameRoomState): GameRoomState {
+  if (
+    state.activeChallenge?.kind === 'question' &&
+    state.activeChallenge.question &&
+    !state.activeChallenge.answered
+  ) {
+    const { correctOptionIds: _hiddenCorrectIds, ...restQuestion } = state.activeChallenge.question;
+    return {
+      ...state,
+      activeChallenge: {
+        ...state.activeChallenge,
+        question: {
+          ...restQuestion,
+          correctIndices: [],
+        },
+      },
+    };
+  }
+  return state;
+}
+
 export function selectQuestionForTile(
   state: GameRoomState,
   tileIndex: number,
@@ -523,7 +635,7 @@ export function selectQuestionForTile(
     candidates = pool;
   }
 
-  const chosen = candidates[Math.floor(Math.random() * candidates.length)] ?? INITIAL_QUESTION_BANK[0];
+  const chosen = candidates[secureRandomInt(candidates.length)] ?? INITIAL_QUESTION_BANK[0];
   if (!state.usedQuestionIds.includes(chosen.id)) {
     state.usedQuestionIds.push(chosen.id);
   }
@@ -535,11 +647,7 @@ export function selectQuestionForTile(
       ? state.config.scoring.investigacion
       : state.config.scoring[chosen.difficulty] ?? chosen.points;
 
-  return {
-    ...chosen,
-    timeSeconds,
-    points,
-  };
+  return shuffleQuestionOptions(chosen, { timeSeconds, points });
 }
 
 export function secureRandomDie(): number {
@@ -606,8 +714,12 @@ export function resolveActivePlayerForTeam(
   team: Team | undefined
 ): string | null {
   if (!team) return null;
+  const kicked = state.kickedPlayerIds;
   const members = state.players.filter(
-    (p) => p.teamId === team.id && isPlayerCountedAsParticipant(p)
+    (p) =>
+      p.teamId === team.id &&
+      isPlayerCountedAsParticipant(p) &&
+      (!kicked || !kicked.includes(p.id))
   );
   if (members.length === 0) return null;
   const idx = ((team.roleRotationOffset ?? 0) % members.length + members.length) % members.length;
@@ -928,10 +1040,15 @@ function checkAndUnlockBadges(team: Team, category: PRLCategory): BadgeId[] {
   return newlyUnlocked;
 }
 
+export type AnswerSelectionInput =
+  | string[]
+  | number[]
+  | { selectedOptionIds?: string[]; selectedIndices?: number[] };
+
 export function submitAnswerServerSide(
   state: GameRoomState,
   playerId: string,
-  selectedIndices: number[],
+  selection: AnswerSelectionInput,
   collaborated = true
 ): {
   ok: boolean;
@@ -962,20 +1079,66 @@ export function submitAnswerServerSide(
   const activeTeam = turnAuth.activeTeam;
 
   const q = state.activeChallenge.question;
-  let isCorrect = false;
+  const canonicalOptionIds =
+    Array.isArray(q.optionIds) && q.optionIds.length === q.options.length
+      ? q.optionIds
+      : q.options.map((_, idx) => `${q.id}_opt_${idx}`);
 
-  if (q.type === 'ordering') {
-    isCorrect =
-      selectedIndices.length === q.correctIndices.length &&
-      selectedIndices.every((val, idx) => val === q.correctIndices[idx]);
-  } else if (q.type === 'epi_select') {
-    const sortedSel = [...selectedIndices].sort((a, b) => a - b);
-    const sortedCor = [...q.correctIndices].sort((a, b) => a - b);
-    isCorrect =
-      sortedSel.length === sortedCor.length &&
-      sortedSel.every((val, idx) => val === sortedCor[idx]);
+  const canonicalCorrectIds =
+    Array.isArray(q.correctOptionIds) && q.correctOptionIds.length > 0
+      ? q.correctOptionIds
+      : q.correctIndices
+          .map((idx) => canonicalOptionIds[idx])
+          .filter((id): id is string => Boolean(id));
+
+  let chosenOptionIds: string[];
+  if (Array.isArray(selection)) {
+    if (selection.length > 0 && typeof selection[0] === 'string') {
+      chosenOptionIds = selection as string[];
+    } else {
+      const idxList = selection as number[];
+      chosenOptionIds = idxList.map((idx) =>
+        idx >= 0 && idx < canonicalOptionIds.length ? canonicalOptionIds[idx] : '__TIMEOUT__'
+      );
+    }
+  } else if (selection.selectedOptionIds && selection.selectedOptionIds.length > 0) {
+    chosenOptionIds = selection.selectedOptionIds;
+  } else if (selection.selectedIndices && selection.selectedIndices.length > 0) {
+    chosenOptionIds = selection.selectedIndices.map((idx) =>
+      idx >= 0 && idx < canonicalOptionIds.length ? canonicalOptionIds[idx] : '__TIMEOUT__'
+    );
   } else {
-    isCorrect = selectedIndices.length > 0 && selectedIndices[0] === q.correctIndices[0];
+    chosenOptionIds = ['__TIMEOUT__'];
+  }
+
+  const resolvedSelectedIndices = chosenOptionIds.map((optId) =>
+    optId === '__TIMEOUT__' ? -1 : canonicalOptionIds.indexOf(optId)
+  );
+  const validSubmittedIds = chosenOptionIds.filter((optId) => canonicalOptionIds.includes(optId));
+  const isTimeout =
+    chosenOptionIds.length === 0 ||
+    chosenOptionIds.includes('__TIMEOUT__') ||
+    validSubmittedIds.length === 0;
+
+  let isCorrect = false;
+  if (!isTimeout) {
+    if (q.type === 'ordering') {
+      isCorrect =
+        chosenOptionIds.length === canonicalCorrectIds.length &&
+        chosenOptionIds.every((optId, pos) => optId === canonicalCorrectIds[pos]);
+    } else if (q.type === 'epi_select') {
+      const selectedSet = new Set(chosenOptionIds);
+      const validUnique = selectedSet.size === chosenOptionIds.length && validSubmittedIds.length === chosenOptionIds.length;
+      isCorrect =
+        validUnique &&
+        selectedSet.size === canonicalCorrectIds.length &&
+        canonicalCorrectIds.every((cid) => selectedSet.has(cid));
+    } else {
+      isCorrect =
+        chosenOptionIds.length === 1 &&
+        canonicalCorrectIds.length > 0 &&
+        chosenOptionIds[0] === canonicalCorrectIds[0];
+    }
   }
 
   const elapsedMs = Math.max(500, Date.now() - state.activeChallenge.startedAt);
@@ -1090,7 +1253,8 @@ export function submitAnswerServerSide(
   }
 
   state.activeChallenge.answered = true;
-  state.activeChallenge.selectedIndices = selectedIndices;
+  state.activeChallenge.selectedOptionIds = chosenOptionIds;
+  state.activeChallenge.selectedIndices = resolvedSelectedIndices;
   state.activeChallenge.isCorrect = isCorrect;
   state.activeChallenge.pointsAwarded = pointsAwarded;
   state.activeChallenge.retreatTiles = retreatTiles;
@@ -1459,9 +1623,58 @@ export function executeTeacherCommandServerSide(
       break;
     }
     case 'FORCE_NEXT_TURN': {
+      if (state.status !== 'playing') {
+        return {
+          ok: false,
+          error: 'Solo se puede saltar el turno cuando la partida está activa.',
+        };
+      }
+      if (finalizeGameIfAllTeamsFinished(state)) {
+        return { ok: false, error: 'La partida ya ha finalizado.' };
+      }
+
+      const activeTeamBefore = state.teams[state.activeTeamIndex];
+      const activePlayerBefore = state.activePlayerId
+        ? state.players.find((p) => p.id === state.activePlayerId)
+        : undefined;
+
       state.lastDiceRoll = null;
-      advanceTurnServerSide(state);
-      state.logs.unshift(createLog('teacher', 'El docente ha avanzado manualmente al siguiente turno.'));
+      state.activeChallenge = null;
+
+      const occupiedTeams = getOccupiedParticipantTeams(state);
+      if (
+        state.config.mode === 'teams' &&
+        occupiedTeams.length === 1 &&
+        activeTeamBefore &&
+        occupiedTeams[0].id === activeTeamBefore.id
+      ) {
+        // Only one team has participants: rotate cleanly to the next member inside that team
+        activeTeamBefore.roleRotationOffset += 1;
+        state.turnNumber += 1;
+        refreshAllTeamRoles(state);
+        state.phase = 'waiting_roll';
+        state.activePlayerId = resolveActivePlayerForTeam(state, activeTeamBefore);
+        state.updatedAt = Date.now();
+      } else {
+        advanceTurnServerSide(state);
+      }
+
+      const activePlayerAfter = state.activePlayerId
+        ? state.players.find((p) => p.id === state.activePlayerId)
+        : undefined;
+      const skippedName =
+        activePlayerBefore?.name ?? activeTeamBefore?.name ?? 'participante actual';
+      const nextName =
+        activePlayerAfter?.name ??
+        state.teams[state.activeTeamIndex]?.name ??
+        'siguiente participante';
+
+      state.logs.unshift(
+        createLog(
+          'teacher',
+          `El docente saltó el turno de ${skippedName}. Nuevo turno: ${nextName}.`
+        )
+      );
       break;
     }
     case 'ASSIGN_TEAM': {
@@ -1490,13 +1703,62 @@ export function executeTeacherCommandServerSide(
       break;
     }
     case 'KICK_PLAYER': {
+      const target = state.players.find((p) => p.id === command.playerId);
+      if (!target) {
+        return { ok: false, error: 'Participante no encontrado en la sala.' };
+      }
+      if (target.isTeacher) {
+        return { ok: false, error: 'El anfitrión no puede expulsarse a sí mismo.' };
+      }
       const idx = state.players.findIndex((p) => p.id === command.playerId);
       if (idx !== -1) {
         const removed = state.players.splice(idx, 1)[0];
+        if (!state.kickedPlayerIds) {
+          state.kickedPlayerIds = [];
+        }
+        if (!state.kickedPlayerIds.includes(removed.id)) {
+          state.kickedPlayerIds.push(removed.id);
+        }
+
+        const activeTeamBefore = state.teams[state.activeTeamIndex];
+        const remainingActiveTeamMembers = activeTeamBefore
+          ? state.players.filter(
+              (p) => p.teamId === activeTeamBefore.id && isPlayerCountedAsParticipant(p)
+            ).length
+          : 0;
+        const hadActiveTurn =
+          state.status === 'playing' &&
+          (state.activePlayerId === removed.id ||
+            (activeTeamBefore?.id === removed.teamId && remainingActiveTeamMembers === 0));
+
         refreshAllTeamRoles(state);
-        syncActivePlayerTurn(state);
+
+        if (hadActiveTurn) {
+          state.lastDiceRoll = null;
+          state.activeChallenge = null;
+          const occupiedAfter = getOccupiedParticipantTeams(state);
+          if (occupiedAfter.length === 0) {
+            state.activePlayerId = null;
+            state.phase = 'waiting_roll';
+            state.updatedAt = Date.now();
+          } else if (
+            state.config.mode === 'teams' &&
+            occupiedAfter.length === 1 &&
+            activeTeamBefore &&
+            occupiedAfter[0].id === activeTeamBefore.id
+          ) {
+            state.phase = 'waiting_roll';
+            state.activePlayerId = resolveActivePlayerForTeam(state, activeTeamBefore);
+            state.updatedAt = Date.now();
+          } else {
+            advanceTurnServerSide(state);
+          }
+        } else {
+          syncActivePlayerTurn(state);
+        }
+
         state.logs.unshift(
-          createLog('teacher', `Docente retiró al participante ${removed.name} de la sala.`)
+          createLog('teacher', `El profesor expulsó al participante ${removed.name} de la sala.`)
         );
       }
       break;
@@ -1550,11 +1812,15 @@ export function executeTeacherCommandServerSide(
     }
     case 'REPEAT_QUESTION': {
       if (state.activeChallenge) {
+        if (state.activeChallenge.kind === 'question' && state.activeChallenge.question) {
+          state.activeChallenge.question = shuffleQuestionOptions(state.activeChallenge.question);
+        }
         const duration =
           state.activeChallenge.kind === 'question'
             ? state.activeChallenge.question?.timeSeconds ?? 45
             : state.activeChallenge.challenge3d?.timeSeconds ?? 90;
         state.activeChallenge.answered = false;
+        state.activeChallenge.selectedOptionIds = undefined;
         state.activeChallenge.selectedIndices = undefined;
         state.activeChallenge.isCorrect = undefined;
         state.activeChallenge.startedAt = now;
@@ -1569,18 +1835,24 @@ export function executeTeacherCommandServerSide(
       const found = bank.find((q) => q.id === command.questionId);
       const activeTeam = state.teams[state.activeTeamIndex];
       if (found && activeTeam) {
+        const timeSeconds = state.config.timers[found.difficulty] ?? found.timeSeconds;
+        const points =
+          found.type === 'accident_investigation'
+            ? state.config.scoring.investigacion
+            : state.config.scoring[found.difficulty] ?? found.points;
+        const shuffledQ = shuffleQuestionOptions(found, { timeSeconds, points });
         state.activeChallenge = {
           kind: 'question',
-          question: found,
+          question: shuffledQ,
           tileIndex: activeTeam.position,
           teamId: activeTeam.id,
           startedAt: now,
-          expiresAt: now + found.timeSeconds * 1000,
+          expiresAt: now + shuffledQ.timeSeconds * 1000,
           answered: false,
         };
         state.phase = 'answering';
         state.logs.unshift(
-          createLog('teacher', `El docente lanzó manualmente la pregunta: "${found.title}".`)
+          createLog('teacher', `El docente lanzó manualmente la pregunta: "${shuffledQ.title}".`)
         );
       }
       break;

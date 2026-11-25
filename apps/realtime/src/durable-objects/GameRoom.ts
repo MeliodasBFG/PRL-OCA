@@ -6,6 +6,7 @@ import {
   JoinRoomRequestSchema,
   RoomJoinErrorCode,
   ServerToClientMessage,
+  TeacherActionHttpSchema,
   TeacherCommandSchema,
   buildMatchHistoryFromState,
   advanceTurnServerSide,
@@ -20,6 +21,7 @@ import {
   normalizeRoomCode,
   refreshAllTeamRoles,
   rollDiceServerSide,
+  sanitizeStateForClient,
   submitAnswerServerSide,
 } from '@prl-oca/shared';
 import {
@@ -161,6 +163,20 @@ export class GameRoom {
     await this.ctx.storage.put('processed_actions', Object.fromEntries(entries));
   }
 
+  private sanitizeOutboundMessage(message: ServerToClientMessage): ServerToClientMessage {
+    if ('state' in message && message.state) {
+      return {
+        ...message,
+        state: sanitizeStateForClient(message.state),
+      };
+    }
+    return message;
+  }
+
+  private isPlayerKicked(state: GameRoomState, playerId: string): boolean {
+    return Boolean(playerId && state.kickedPlayerIds?.includes(playerId));
+  }
+
   private jsonError(
     status: number,
     error: string,
@@ -294,7 +310,7 @@ export class GameRoom {
           playerId: resolvedTeacherId,
           playerToken,
           teacherToken,
-          state: this.stateData,
+          state: sanitizeStateForClient(this.stateData),
         }),
         {
           status: 200,
@@ -326,10 +342,13 @@ export class GameRoom {
           cors
         );
       }
-      return new Response(JSON.stringify({ success: true, ok: true, state: loaded.state }), {
-        status: 200,
-        headers: { ...cors, 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ success: true, ok: true, state: sanitizeStateForClient(loaded.state) }),
+        {
+          status: 200,
+          headers: { ...cors, 'Content-Type': 'application/json' },
+        }
+      );
     }
 
     // Validate & authorize joining an existing room -> POST /join (NEVER initializes a room)
@@ -394,6 +413,7 @@ export class GameRoom {
           ROOM_CLOSED: 410,
           ROOM_FINISHED: 403,
           ROOM_NOT_JOINABLE: 403,
+          PLAYER_KICKED: 403,
           ROOM_FULL: 409,
         };
         const status = (eligibility.errorCode && statusMap[eligibility.errorCode]) ?? 403;
@@ -488,7 +508,7 @@ export class GameRoom {
           playerToken,
           teacherToken: issuedTeacherToken,
           reconnected: Boolean(joinRes.reconnected),
-          state: loaded.state,
+          state: sanitizeStateForClient(loaded.state),
         }),
         { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } }
       );
@@ -564,13 +584,16 @@ export class GameRoom {
         );
       }
 
+      let resultState = loaded.state;
       const authRes = await this.runSerialized(async () => {
         const fresh = await this.loadVerifiedExistingRoom(roomCode);
         const targetState = fresh.ok ? fresh.state : loaded.state;
-        return this.executeValidatedGameplayAction(null, targetState, {
+        const execRes = await this.executeValidatedGameplayAction(null, targetState, {
           ...actionMsg,
           playerToken: suppliedToken,
         });
+        resultState = targetState;
+        return execRes;
       });
       if (!authRes.ok) {
         return new Response(
@@ -579,7 +602,7 @@ export class GameRoom {
             ok: false,
             error: authRes.code,
             message: authRes.message,
-            ...(authRes.includeState ? { state: loaded.state } : {}),
+            ...(authRes.includeState ? { state: sanitizeStateForClient(resultState) } : {}),
           }),
           {
             status: authRes.status,
@@ -587,13 +610,18 @@ export class GameRoom {
           }
         );
       }
+      const safeEvent = this.sanitizeOutboundMessage(authRes.event);
+      const safeState =
+        'state' in safeEvent && safeEvent.state
+          ? safeEvent.state
+          : sanitizeStateForClient(resultState);
       return new Response(
         JSON.stringify({
           success: true,
           ok: true,
           deduplicated: Boolean(authRes.deduplicated),
-          event: authRes.event,
-          state: loaded.state,
+          event: safeEvent,
+          state: safeState,
         }),
         { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } }
       );
@@ -605,22 +633,25 @@ export class GameRoom {
       if (!loaded.ok) {
         return this.jsonError(loaded.status, loaded.error, loaded.message, cors);
       }
-      const rawBody = (await request.json().catch(() => ({}))) as {
-        teacherToken?: string;
-        command?: unknown;
-      };
+      const rawBody = (await request.json().catch(() => ({}))) as Record<string, unknown>;
       const headerToken = request.headers.get('X-Teacher-Token')?.trim();
-      const token = rawBody.teacherToken?.trim() || headerToken;
-      const parsedCmd = TeacherCommandSchema.safeParse(rawBody.command);
-      if (!parsedCmd.success) {
+      const parsedBody = TeacherActionHttpSchema.safeParse(rawBody);
+      if (!parsedBody.success) {
         return this.jsonError(400, 'INVALID_COMMAND', 'Comando docente inválido.', cors);
       }
-      const cmdResult = await this.executeAuthoritativeTeacherCommand(
-        loaded.state,
-        token,
-        parsedCmd.data,
-        'http'
-      );
+      const token = parsedBody.data.teacherToken?.trim() || headerToken;
+      const cmdResult = await this.runSerialized(async () => {
+        const fresh = await this.loadVerifiedExistingRoom(roomCode);
+        const targetState = fresh.ok ? fresh.state : loaded.state;
+        return this.executeAuthoritativeTeacherCommand(
+          targetState,
+          token,
+          parsedBody.data.command,
+          'http',
+          undefined,
+          parsedBody.data.actionId
+        );
+      });
       if (!cmdResult.ok) {
         return this.jsonError(cmdResult.status, cmdResult.code, cmdResult.message, cors);
       }
@@ -628,9 +659,10 @@ export class GameRoom {
         JSON.stringify({
           success: true,
           ok: true,
+          deduplicated: Boolean(cmdResult.deduplicated),
           gameStarted: cmdResult.state.status === 'playing',
           startedAt: cmdResult.state.startedAt,
-          state: cmdResult.state,
+          state: sanitizeStateForClient(cmdResult.state),
         }),
         { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } }
       );
@@ -800,16 +832,9 @@ export class GameRoom {
       return;
     }
 
-    // Deduplicate non-gameplay actions upfront; gameplay actions handle idempotent replay inside runSerialized
+    // Deduplicate JOIN_ROOM upfront; gameplay & teacher actions handle idempotent replay inside runSerialized
     await this.ensureProcessedActionsLoaded();
-    const isGameplayAction =
-      msg.type === 'TOGGLE_READY' ||
-      msg.type === 'SELECT_TEAM' ||
-      msg.type === 'ROLL_DICE' ||
-      msg.type === 'SUBMIT_ANSWER' ||
-      msg.type === 'COMPLETE_CHALLENGE_3D' ||
-      msg.type === 'NEXT_TURN';
-    if ('actionId' in msg && !isGameplayAction) {
+    if (msg.type === 'JOIN_ROOM') {
       if (this.processedActionIds.has(msg.actionId)) {
         return;
       }
@@ -943,6 +968,13 @@ export class GameRoom {
             code: eligibility.errorCode ?? 'JOIN_REJECTED',
             message: eligibility.error ?? 'No se pudo unir a la sala.',
           });
+          if (eligibility.errorCode === 'PLAYER_KICKED') {
+            try {
+              if (typeof ws.close === 'function') ws.close(4003, 'PLAYER_KICKED');
+            } catch {
+              // Ignore
+            }
+          }
           return;
         }
 
@@ -1056,13 +1088,18 @@ export class GameRoom {
       }
 
       case 'TEACHER_ACTION': {
-        const res = await this.executeAuthoritativeTeacherCommand(
-          state,
-          msg.teacherToken,
-          msg.command,
-          'ws',
-          ws
-        );
+        const res = await this.runSerialized(async () => {
+          const fresh = await this.loadVerifiedExistingRoom(state.roomCode);
+          const targetState = fresh.ok ? fresh.state : state;
+          return this.executeAuthoritativeTeacherCommand(
+            targetState,
+            msg.teacherToken,
+            msg.command,
+            'ws',
+            ws,
+            msg.actionId
+          );
+        });
         if (!res.ok) {
           this.sendToSocket(ws, {
             type: 'ERROR',
@@ -1142,7 +1179,32 @@ export class GameRoom {
       };
     }
 
-    // 3. Verify player actually belongs to this room
+    // 3. Reject kicked players explicitly BEFORE checking missing playerId / token validity
+    if (this.isPlayerKicked(state, msg.playerId)) {
+      console.warn(
+        `[DO:${state.roomCode}] PLAYER_KICKED action=${msg.type} transport=${transport} playerId=${msg.playerId}`
+      );
+      if (ws) {
+        this.sendToSocket(ws, {
+          type: 'ERROR',
+          code: 'PLAYER_KICKED',
+          message: 'Has sido expulsado de la sala por el profesor.',
+        });
+        try {
+          if (typeof ws.close === 'function') ws.close(4003, 'PLAYER_KICKED');
+        } catch {
+          // Ignore
+        }
+      }
+      return {
+        ok: false,
+        status: 403,
+        code: 'PLAYER_KICKED',
+        message: 'Has sido expulsado de la sala por el profesor.',
+      };
+    }
+
+    // 4. Verify player actually belongs to this room
     const player = state.players.find((pl) => pl.id === msg.playerId);
     if (!player) {
       console.warn(
@@ -1156,7 +1218,7 @@ export class GameRoom {
       };
     }
 
-    // 4. Idempotent replay check (prevents duplicate dice rolls on HTTP timeouts or WS reconnects)
+    // 5. Idempotent replay check (prevents duplicate dice rolls on HTTP timeouts or WS reconnects)
     if ('actionId' in msg && this.processedActionResults.has(msg.actionId)) {
       const cachedEvent = this.processedActionResults.get(msg.actionId)!;
       console.log(
@@ -1253,7 +1315,10 @@ export class GameRoom {
         const ansRes = submitAnswerServerSide(
           state,
           msg.playerId,
-          msg.selectedIndices,
+          {
+            selectedOptionIds: msg.selectedOptionIds,
+            selectedIndices: msg.selectedIndices,
+          },
           msg.collaborated ?? true
         );
         if (!ansRes.ok) {
@@ -1341,9 +1406,10 @@ export class GameRoom {
     teacherToken: string | undefined,
     command: Extract<ClientToServerMessage, { type: 'TEACHER_ACTION' }>['command'],
     source: 'ws' | 'http',
-    originWs?: WebSocket
+    originWs?: WebSocket,
+    actionId?: string
   ): Promise<
-    | { ok: true; state: GameRoomState; wasTransitionToPlaying: boolean }
+    | { ok: true; state: GameRoomState; wasTransitionToPlaying: boolean; deduplicated?: boolean }
     | { ok: false; code: string; status: number; message: string }
   > {
     if (
@@ -1362,6 +1428,23 @@ export class GameRoom {
         code: 'UNAUTHORIZED_TEACHER',
         status: 401,
         message: 'Token de docente inválido o expirado.',
+      };
+    }
+
+    await this.ensureProcessedActionsLoaded();
+    if (actionId && this.processedActionResults.has(actionId)) {
+      const cachedEvent = this.processedActionResults.get(actionId)!;
+      console.log(
+        `[DO:${state.roomCode}] Deduplicated TEACHER_ACTION kind=${command.kind} source=${source} actionId=${actionId}`
+      );
+      if (originWs) {
+        this.sendToSocket(originWs, cachedEvent);
+      }
+      return {
+        ok: true,
+        deduplicated: true,
+        state,
+        wasTransitionToPlaying: false,
       };
     }
 
@@ -1391,7 +1474,37 @@ export class GameRoom {
 
     await this.persist();
 
-    if (command.kind === 'CLOSE_ROOM') {
+    let primaryEvent: ServerToClientMessage = { type: 'STATE_SYNC', state };
+
+    if (command.kind === 'KICK_PLAYER') {
+      for (const sock of this.getActiveSockets()) {
+        const att = this.getSocketAttachment(sock);
+        if (att?.playerId === command.playerId) {
+          this.sendToSocket(sock, {
+            type: 'ERROR',
+            code: 'PLAYER_KICKED',
+            message: 'Has sido expulsado de la sala por el profesor.',
+          });
+          this.socketPlayers.delete(sock);
+          if (typeof sock.serializeAttachment === 'function') {
+            try {
+              sock.serializeAttachment({ playerId: '' });
+            } catch {
+              // Ignore
+            }
+          }
+          try {
+            if (typeof sock.close === 'function') sock.close(4003, 'PLAYER_KICKED');
+          } catch {
+            // Ignore
+          }
+        }
+      }
+      const delivered = this.broadcast({ type: 'STATE_SYNC', state });
+      console.log(
+        `[DO:${state.roomCode}] KICK_PLAYER kicked=${command.playerId} source=${source} remaining=${state.players.length} delivered=${delivered}`
+      );
+    } else if (command.kind === 'CLOSE_ROOM') {
       this.broadcast({
         type: 'ERROR',
         code: 'ROOM_CLOSED',
@@ -1409,24 +1522,20 @@ export class GameRoom {
       console.log(`[DO:${state.roomCode}] ROOM_CLOSED source=${source}`);
     } else if (command.kind === 'START_GAME') {
       const startedAt = state.startedAt ?? Date.now();
+      primaryEvent = {
+        type: 'GAME_STARTED',
+        roomCode: state.roomCode,
+        startedAt,
+        state,
+      };
       if (wasTransitionToPlaying) {
-        const deliveredStart = this.broadcast({
-          type: 'GAME_STARTED',
-          roomCode: state.roomCode,
-          startedAt,
-          state,
-        });
+        const deliveredStart = this.broadcast(primaryEvent);
         const deliveredSync = this.broadcast({ type: 'STATE_SYNC', state });
         console.log(
           `[DO:${state.roomCode}] GAME_STARTED source=${source} startedAt=${startedAt} players=${state.players.length} deliveredStart=${deliveredStart} deliveredSync=${deliveredSync}`
         );
       } else if (originWs) {
-        this.sendToSocket(originWs, {
-          type: 'GAME_STARTED',
-          roomCode: state.roomCode,
-          startedAt,
-          state,
-        });
+        this.sendToSocket(originWs, primaryEvent);
         this.sendToSocket(originWs, { type: 'STATE_SYNC', state });
       }
     } else {
@@ -1436,19 +1545,23 @@ export class GameRoom {
       );
     }
 
+    if (actionId) {
+      await this.recordProcessedAction(actionId, this.sanitizeOutboundMessage(primaryEvent));
+    }
+
     return { ok: true, state, wasTransitionToPlaying };
   }
 
   private sendToSocket(ws: WebSocket, message: ServerToClientMessage): void {
     try {
-      ws.send(JSON.stringify(message));
+      ws.send(JSON.stringify(this.sanitizeOutboundMessage(message)));
     } catch {
       // Socket closed
     }
   }
 
   private broadcast(message: ServerToClientMessage, exclude?: WebSocket): number {
-    const payload = JSON.stringify(message);
+    const payload = JSON.stringify(this.sanitizeOutboundMessage(message));
     const sockets =
       typeof this.ctx.getWebSockets === 'function'
         ? this.ctx.getWebSockets()

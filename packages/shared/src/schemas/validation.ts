@@ -148,6 +148,12 @@ export const TeacherCommandSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
+export const TeacherActionHttpSchema = z.object({
+  actionId: z.string().min(1).max(64).optional(),
+  teacherToken: z.string().optional(),
+  command: TeacherCommandSchema,
+});
+
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('JOIN_ROOM'),
@@ -185,10 +191,21 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('SUBMIT_ANSWER'),
     actionId: z.string().min(1).max(64),
     playerId: z.string().min(1).max(64),
-    selectedIndices: z.array(z.number().int().min(-1).max(10)).min(1),
+    selectedOptionIds: z.array(z.string().min(1).max(128)).min(1).max(10).optional(),
+    selectedIndices: z.array(z.number().int().min(-1).max(10)).min(1).max(10).optional(),
     collaborated: z.boolean().optional(),
     playerToken: z.string().optional(),
-  }),
+  }).refine(
+    (data) =>
+      Boolean(
+        (data.selectedOptionIds && data.selectedOptionIds.length > 0) ||
+          (data.selectedIndices && data.selectedIndices.length > 0)
+      ),
+    {
+      message: 'Debes seleccionar al menos una opción de respuesta.',
+      path: ['selectedOptionIds'],
+    }
+  ),
   z.object({
     type: z.literal('COMPLETE_CHALLENGE_3D'),
     actionId: z.string().min(1).max(64),

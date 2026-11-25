@@ -45,8 +45,8 @@ export const QuestionModal: React.FC = () => {
   } = useGameStore();
   const activeChallenge = roomState?.activeChallenge;
 
-  const [selected, setSelected] = useState<number[]>([]);
-  const [orderSequence, setOrderSequence] = useState<number[]>([0, 1, 2, 3]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [orderOptionIds, setOrderOptionIds] = useState<string[]>([]);
   const [collaborated, setCollaborated] = useState<boolean>(true);
   const [secondsLeft, setSecondsLeft] = useState<number>(45);
 
@@ -54,6 +54,13 @@ export const QuestionModal: React.FC = () => {
   const activeTeam = roomState?.teams[roomState.activeTeamIndex ?? 0];
   const tile = BOARD_TILES.find((t) => t.index === activeChallenge?.tileIndex);
   const isMyTurn = roomState ? canPlayerActOnTeamTurn(roomState, playerId).allowed : false;
+
+  const optionIds = question
+    ? question.optionIds && question.optionIds.length === question.options.length
+      ? question.optionIds
+      : question.options.map((_, idx) => `${question.id}_opt_${idx}`)
+    : [];
+  const optionIdsSignature = optionIds.join('|');
 
   const isModalVisible = Boolean(
     roomState &&
@@ -67,17 +74,12 @@ export const QuestionModal: React.FC = () => {
 
   useEffect(() => {
     if (!question || !activeChallenge || !isModalVisible) return;
-    setSelected([]);
+    setSelectedIds([]);
     if (question.type === 'ordering') {
-      const indices = question.options.map((_, idx) => idx);
-      if (indices.length > 1) {
-        const first = indices.shift()!;
-        indices.push(first);
-      }
-      setOrderSequence(indices);
+      setOrderOptionIds([...optionIds]);
     }
     setSecondsLeft(question.timeSeconds);
-  }, [question?.id, activeChallenge?.startedAt, isModalVisible]);
+  }, [question?.id, activeChallenge?.startedAt, optionIdsSignature, isModalVisible]);
 
   useEffect(() => {
     if (
@@ -104,7 +106,7 @@ export const QuestionModal: React.FC = () => {
         clearInterval(timer);
         // Only the active turn's player/teacher submits the timeout resolution
         if (isMyTurn) {
-          submitAnswer([-1], false);
+          submitAnswer(['__TIMEOUT__'], false);
         }
       }
     }, 1000);
@@ -127,37 +129,37 @@ export const QuestionModal: React.FC = () => {
   const isAnswered = activeChallenge.answered;
   const isCorrect = Boolean(activeChallenge.isCorrect);
 
-  const handleToggleOption = (idx: number) => {
+  const handleToggleOption = (optId: string) => {
     if (isAnswered || !isMyTurn) return;
     soundEngine.playSfx('button_click');
     if (question.type === 'epi_select') {
-      setSelected((prev) =>
-        prev.includes(idx) ? prev.filter((i) => i !== idx) : [...prev, idx]
+      setSelectedIds((prev) =>
+        prev.includes(optId) ? prev.filter((id) => id !== optId) : [...prev, optId]
       );
     } else {
-      setSelected([idx]);
+      setSelectedIds([optId]);
     }
   };
 
   const moveOrderItem = (pos: number, dir: -1 | 1) => {
     if (isAnswered || !isMyTurn) return;
     const target = pos + dir;
-    if (target < 0 || target >= orderSequence.length) return;
+    if (target < 0 || target >= orderOptionIds.length) return;
     soundEngine.playSfx('button_click');
-    const copy = [...orderSequence];
+    const copy = [...orderOptionIds];
     const tmp = copy[pos];
     copy[pos] = copy[target];
     copy[target] = tmp;
-    setOrderSequence(copy);
+    setOrderOptionIds(copy);
   };
 
   const handleConfirm = () => {
     if (isAnswered || !isMyTurn) return;
     if (question.type === 'ordering') {
-      submitAnswer(orderSequence, collaborated);
+      submitAnswer(orderOptionIds, collaborated);
     } else {
-      if (selected.length === 0) return;
-      submitAnswer(selected, collaborated);
+      if (selectedIds.length === 0) return;
+      submitAnswer(selectedIds, collaborated);
     }
   };
 
@@ -223,44 +225,38 @@ export const QuestionModal: React.FC = () => {
           {question.type === 'ordering' ? (
             <div className="q-ordering-list">
               <p className="q-helper-note">
-                Utiliza las flechas para ordenar la secuencia preventiva correcta de arriba a abajo
-                (o pulsa "Colocar en orden normativo"):
+                Utiliza las flechas para ordenar la secuencia preventiva correcta de arriba a abajo:
               </p>
-              {orderSequence.map((optIdx, posIdx) => (
-                <div key={optIdx} className="q-order-item">
-                  <span className="q-order-step">Paso {posIdx + 1}</span>
-                  <span className="q-order-text">{question.options[optIdx]}</span>
-                  {!isAnswered && (
-                    <div className="q-order-btns">
-                      <button
-                        type="button"
-                        onClick={() => moveOrderItem(posIdx, -1)}
-                        disabled={posIdx === 0}
-                        aria-label="Subir paso"
-                      >
-                        <ArrowUp size={16} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveOrderItem(posIdx, 1)}
-                        disabled={posIdx === orderSequence.length - 1}
-                        aria-label="Bajar paso"
-                      >
-                        <ArrowDown size={16} />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-              {!isAnswered && (
-                <button
-                  type="button"
-                  className="btn-ghost-sm"
-                  onClick={() => setOrderSequence([...question.correctIndices])}
-                >
-                  Colocar en orden normativo (1º → 4º)
-                </button>
-              )}
+              {orderOptionIds.map((optId, posIdx) => {
+                const optTextIdx = optionIds.indexOf(optId);
+                const optText = optTextIdx >= 0 ? question.options[optTextIdx] : '';
+                return (
+                  <div key={optId} className="q-order-item">
+                    <span className="q-order-step">Paso {posIdx + 1}</span>
+                    <span className="q-order-text">{optText}</span>
+                    {!isAnswered && (
+                      <div className="q-order-btns">
+                        <button
+                          type="button"
+                          onClick={() => moveOrderItem(posIdx, -1)}
+                          disabled={posIdx === 0 || !isMyTurn}
+                          aria-label="Subir paso"
+                        >
+                          <ArrowUp size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveOrderItem(posIdx, 1)}
+                          disabled={posIdx === orderOptionIds.length - 1 || !isMyTurn}
+                          aria-label="Bajar paso"
+                        >
+                          <ArrowDown size={16} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div className="q-options-grid">
@@ -270,8 +266,16 @@ export const QuestionModal: React.FC = () => {
                 </p>
               )}
               {question.options.map((optText, idx) => {
-                const isSelected = selected.includes(idx);
-                const isRightOption = question.correctIndices.includes(idx);
+                const optId = optionIds[idx];
+                const chosenIds = activeChallenge.selectedOptionIds ?? selectedIds;
+                const isSelected = isAnswered
+                  ? chosenIds.includes(optId) ||
+                    Boolean(activeChallenge.selectedIndices?.includes(idx))
+                  : selectedIds.includes(optId);
+                const isRightOption =
+                  isAnswered &&
+                  (Boolean(question.correctOptionIds?.includes(optId)) ||
+                    question.correctIndices.includes(idx));
                 let statusClass = '';
                 if (isAnswered) {
                   if (isRightOption) statusClass = 'opt-correct-highlight';
@@ -282,10 +286,11 @@ export const QuestionModal: React.FC = () => {
 
                 return (
                   <button
-                    key={idx}
+                    key={optId}
                     type="button"
                     disabled={isAnswered || !isMyTurn}
-                    onClick={() => handleToggleOption(idx)}
+                    onClick={() => handleToggleOption(optId)}
+                    data-option-id={optId}
                     className={`q-option-btn ${statusClass}`}
                   >
                     <span className="q-opt-letter">{String.fromCharCode(65 + idx)}</span>
@@ -420,7 +425,7 @@ export const QuestionModal: React.FC = () => {
               type="button"
               className="btn-primary btn-lg"
               onClick={handleConfirm}
-              disabled={question.type !== 'ordering' && selected.length === 0}
+              disabled={question.type !== 'ordering' && selectedIds.length === 0}
             >
               Confirmar Decisión Preventiva
             </button>

@@ -1044,6 +1044,10 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
       const j1 = (await r1.json()) as { state: GameRoomState };
       expect(j1.state.teams[0].position).toBe(48);
       const q1 = j1.state.activeChallenge!.question!;
+      expect(q1.correctIndices).toEqual([]);
+      expect(q1.correctOptionIds).toBeUndefined();
+      const origQ1 = INITIAL_QUESTION_BANK.find((q) => q.id === q1.id)!;
+      const expectedCorrectIds1 = origQ1.correctIndices.map((idx) => `${origQ1.id}_opt_${idx}`);
 
       const a1 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
         method: 'POST',
@@ -1052,13 +1056,14 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
           type: 'SUBMIT_ANSWER',
           actionId: 'p15_t1_ans48',
           playerId: room.playerId,
-          selectedIndices: q1.correctIndices,
+          selectedOptionIds: expectedCorrectIds1,
           collaborated: true,
           playerToken: room.playerToken,
         }),
       });
       expect(a1.status).toBe(200);
       const ansJson1 = (await a1.json()) as { state: GameRoomState };
+      expect(ansJson1.state.activeChallenge!.question!.correctIndices.length).toBeGreaterThan(0);
       // Crítico: team_1 llegó en #1, pero Alumno 1 aún no ha llegado -> partida sigue PLAYING
       expect(ansJson1.state.status).toBe('playing');
       expect(ansJson1.state.phase).toBe('showing_feedback');
@@ -1095,8 +1100,10 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
       });
       expect(r2.status).toBe(200);
       const q2 = ((await r2.json()) as { state: GameRoomState }).state.activeChallenge!.question!;
-      const nonCorrectIdx = q2.options.findIndex((_, i) => !q2.correctIndices.includes(i));
-      const wrongSelection = nonCorrectIdx >= 0 ? [nonCorrectIdx] : [-1];
+      const origQ2 = INITIAL_QUESTION_BANK.find((q) => q.id === q2.id)!;
+      const expectedCorrectIds2 = origQ2.correctIndices.map((idx) => `${origQ2.id}_opt_${idx}`);
+      const wrongOptId2 = (q2.optionIds ?? []).find((id) => !expectedCorrectIds2.includes(id));
+      const wrongSelection = wrongOptId2 ? [wrongOptId2] : ['__TIMEOUT__'];
       const a2Wrong = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Player-Token': stu.playerToken },
@@ -1104,7 +1111,7 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
           type: 'SUBMIT_ANSWER',
           actionId: 'p15_s1_wrong48',
           playerId: stu.playerId,
-          selectedIndices: wrongSelection,
+          selectedOptionIds: wrongSelection,
           collaborated: false,
           playerToken: stu.playerToken,
         }),
@@ -1146,6 +1153,8 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
       });
       expect(r3.status).toBe(200);
       const q3 = ((await r3.json()) as { state: GameRoomState }).state.activeChallenge!.question!;
+      const origQ3 = INITIAL_QUESTION_BANK.find((q) => q.id === q3.id)!;
+      const expectedCorrectIds3 = origQ3.correctIndices.map((idx) => `${origQ3.id}_opt_${idx}`);
       const a3 = await harness.httpFetch(`/api/rooms/${room.roomCode}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Player-Token': stu.playerToken },
@@ -1153,7 +1162,7 @@ describe('Sistema Autoritativo de Turnos por PlayerId y Bloqueo Estricto (Prueba
           type: 'SUBMIT_ANSWER',
           actionId: 'p15_s1_ans48_win',
           playerId: stu.playerId,
-          selectedIndices: q3.correctIndices,
+          selectedOptionIds: expectedCorrectIds3,
           collaborated: false,
           playerToken: stu.playerToken,
         }),

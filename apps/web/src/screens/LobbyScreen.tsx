@@ -11,6 +11,7 @@ import {
   Wifi,
 } from 'lucide-react';
 import {
+  Player,
   TEAM_ROLE_INFO,
   getRoomParticipantStats,
   isPlayerCountedAsParticipant,
@@ -40,6 +41,7 @@ export const LobbyScreen: React.FC = () => {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState<string>('');
   const [startingGame, setStartingGame] = useState<boolean>(false);
+  const [confirmKickTarget, setConfirmKickTarget] = useState<Player | null>(null);
 
   // Automatic WebSocket reconnect + HTTP state resync safety while waiting in Lobby
   useEffect(() => {
@@ -343,19 +345,16 @@ export const LobbyScreen: React.FC = () => {
                               >
                                 <Edit2 size={14} />
                               </button>
-                              <button
-                                type="button"
-                                className="btn-icon-only danger"
-                                title="Eliminar participante"
-                                onClick={() =>
-                                  runTeacherCommand({
-                                    kind: 'KICK_PLAYER',
-                                    playerId: m.id,
-                                  })
-                                }
-                              >
-                                <Trash2 size={14} />
-                              </button>
+                              {!m.isTeacher && m.id !== playerId && (
+                                <button
+                                  type="button"
+                                  className="btn-kick-danger compact"
+                                  title={`Expulsar a ${m.name}`}
+                                  onClick={() => setConfirmKickTarget(m)}
+                                >
+                                  <Trash2 size={13} /> <span>Expulsar</span>
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -367,6 +366,40 @@ export const LobbyScreen: React.FC = () => {
             );
           })}
         </div>
+
+        {isTeacher && confirmKickTarget && (
+          <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirmar expulsión">
+            <div className="modal-card lobby-kick-confirm-card">
+              <h3>¿Seguro que quieres expulsar a este jugador?</h3>
+              <p className="card-desc">
+                Jugador seleccionado: <strong>{confirmKickTarget.name}</strong>. Su conexión actual
+                se cerrará inmediatamente y no podrá volver con las mismas credenciales.
+              </p>
+              <div className="tp-confirm-actions">
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={() => {
+                    void runTeacherCommand({
+                      kind: 'KICK_PLAYER',
+                      playerId: confirmKickTarget.id,
+                    });
+                    setConfirmKickTarget(null);
+                  }}
+                >
+                  Confirmar expulsión
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmKickTarget(null)}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );

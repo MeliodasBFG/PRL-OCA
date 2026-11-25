@@ -117,12 +117,22 @@ export interface QuestionItem {
   type: QuestionType;
   options: string[];
   /**
+   * Stable per-option identifiers matching the current order of `options`.
+   * Generated server-side on presentation so client submissions validate by ID rather than position.
+   */
+  optionIds?: string[];
+  /**
    * For standard single-choice ('test', 'true_false', 'visual_id', 'practical_case', 'accident_investigation', 'team_challenge'):
    * array with single index e.g. [1].
    * For 'epi_select': array of all required option indices sorted e.g. [0, 2, 3].
    * For 'ordering': sequence of option indices in the right order e.g. [2, 0, 1, 3].
+   * Stripped to [] in client payloads until `ActiveTurnChallenge.answered === true`.
    */
   correctIndices: number[];
+  /**
+   * Stable canonical identifiers of correct options (stripped from un-answered client payloads).
+   */
+  correctOptionIds?: string[];
   explanation: {
     whyCorrect: string;
     riskIdentified: string;
@@ -275,6 +285,7 @@ export interface ActiveTurnChallenge {
   startedAt: number;
   expiresAt: number;
   answered: boolean;
+  selectedOptionIds?: string[];
   selectedIndices?: number[];
   isCorrect?: boolean;
   pointsAwarded?: number;
@@ -324,6 +335,7 @@ export type RoomJoinErrorCode =
   | 'INVALID_PLAYER_TOKEN'
   | 'UNAUTHORIZED_PLAYER'
   | 'PLAYER_NOT_FOUND'
+  | 'PLAYER_KICKED'
   | 'NOT_YOUR_TURN'
   | 'JOIN_REJECTED';
 
@@ -332,6 +344,7 @@ export interface GameRoomState {
   status: RoomStatus;
   config: GameConfig;
   players: Player[];
+  kickedPlayerIds?: string[];
   teams: Team[];
   activeTeamIndex: number;
   activePlayerId?: string | null;
@@ -417,7 +430,8 @@ export type ClientToServerMessage =
       type: 'SUBMIT_ANSWER';
       actionId: string;
       playerId: string;
-      selectedIndices: number[];
+      selectedOptionIds?: string[];
+      selectedIndices?: number[];
       collaborated?: boolean;
       playerToken?: string;
     }

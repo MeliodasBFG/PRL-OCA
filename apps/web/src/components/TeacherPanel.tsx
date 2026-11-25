@@ -16,6 +16,7 @@ import {
   BOARD_TILES,
   CHALLENGES_3D,
   Difficulty,
+  Player,
   WrongAnswerPenalty,
   getRoomParticipantStats,
   isPlayerCountedAsParticipant,
@@ -26,6 +27,8 @@ export const TeacherPanel: React.FC = () => {
   const {
     showTeacherPanel,
     roomState,
+    playerId,
+    isTeacher,
     questionBank,
     setShowTeacherPanel,
     setProjectorMode,
@@ -38,10 +41,20 @@ export const TeacherPanel: React.FC = () => {
   const [selectedChallengeId, setSelectedChallengeId] = useState<string>(
     CHALLENGES_3D[4]?.id ?? 'challenge_5'
   );
+  const [confirmSkipTurnTarget, setConfirmSkipTurnTarget] = useState<string | null>(null);
+  const [confirmKickTarget, setConfirmKickTarget] = useState<Player | null>(null);
 
-  if (!showTeacherPanel || !roomState) return null;
+  if (!showTeacherPanel || !roomState || !isTeacher) return null;
 
   const isPaused = roomState.status === 'paused';
+  const isPlaying = roomState.status === 'playing';
+  const activeTeam = roomState.teams[roomState.activeTeamIndex ?? 0];
+  const activePlayer = roomState.activePlayerId
+    ? roomState.players.find((p) => p.id === roomState.activePlayerId)
+    : undefined;
+  const activeTurnOwnerName = activePlayer?.name ?? activeTeam?.name ?? 'Sin jugador activo';
+  const hasAnyParticipant = roomState.players.some(isPlayerCountedAsParticipant);
+  const canSkipTurn = isPlaying && hasAnyParticipant;
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tp-title">
@@ -65,6 +78,51 @@ export const TeacherPanel: React.FC = () => {
           {/* 1. Control del Flujo de la Partida */}
           <section className="tp-section">
             <h3>1. Estado de la Sala y Control de Turnos</h3>
+            <div className="tp-current-turn-card">
+              <div>
+                <span className="tp-turn-label">Turno #{roomState.turnNumber} activo:</span>{' '}
+                <strong>{activeTurnOwnerName}</strong>
+                {activeTeam && <span className="tp-turn-team"> ({activeTeam.name})</span>}
+              </div>
+              {activePlayer && (
+                <span
+                  className={`tp-conn-pill ${activePlayer.connected ? 'connected' : 'disconnected'}`}
+                >
+                  {activePlayer.connected ? 'Conectado' : 'Desconectado'}
+                </span>
+              )}
+            </div>
+
+            {confirmSkipTurnTarget && (
+              <div className="tp-confirm-box" role="alertdialog" aria-label="Confirmar saltar turno">
+                <p>
+                  <strong>¿Quieres saltar el turno de {confirmSkipTurnTarget}?</strong>
+                </p>
+                <p className="card-desc">
+                  Avanzará 1 turno al siguiente participante activo sin tirar dados ni mover fichas.
+                </p>
+                <div className="tp-confirm-actions">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => {
+                      void runTeacherCommand({ kind: 'FORCE_NEXT_TURN' });
+                      setConfirmSkipTurnTarget(null);
+                    }}
+                  >
+                    Confirmar saltar turno
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setConfirmSkipTurnTarget(null)}
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="tp-btn-row">
               {roomState.status === 'lobby' && (
                 <button
@@ -94,9 +152,15 @@ export const TeacherPanel: React.FC = () => {
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={() => runTeacherCommand({ kind: 'FORCE_NEXT_TURN' })}
+                disabled={!canSkipTurn}
+                title={
+                  canSkipTurn
+                    ? `Saltar el turno actual de ${activeTurnOwnerName}`
+                    : 'Solo disponible mientras la partida está en curso (no pausada ni finalizada)'
+                }
+                onClick={() => setConfirmSkipTurnTarget(activeTurnOwnerName)}
               >
-                <FastForward size={16} /> Cambiar Turno
+                <FastForward size={16} /> Saltar turno
               </button>
 
               <button
@@ -498,49 +562,97 @@ export const TeacherPanel: React.FC = () => {
                     <strong>{stats.disconnectedCount}</strong> · Docente:{' '}
                     <strong>{stats.teacherConnected ? 'Conectado' : 'Desconectado'}</strong>
                   </p>
-                  <div className="tp-players-list">
-                    {listedParticipants.map((player) => (
-                      <div key={player.id} className="tp-player-row">
-                        <span className="tp-player-name">
-                          <UserCheck size={15} /> {player.name}{' '}
-                          <small style={{ opacity: 0.75 }}>
-                            ({player.connected ? 'Conectado' : 'Desconectado'})
-                          </small>
-                        </span>
-                        <div className="tp-player-actions">
-                          <select
-                            value={player.teamId}
-                            onChange={(e) =>
-                              runTeacherCommand({
-                                kind: 'ASSIGN_TEAM',
-                                playerId: player.id,
-                                teamId: e.target.value,
-                              })
-                            }
-                            aria-label={`Cambiar equipo de ${player.name}`}
-                          >
-                            {roomState.teams.map((t) => (
-                              <option key={t.id} value={t.id}>
-                                {t.name}
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            className="btn-icon-only danger"
-                            title="Expulsar participante"
-                            onClick={() =>
-                              runTeacherCommand({
-                                kind: 'KICK_PLAYER',
-                                playerId: player.id,
-                              })
-                            }
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </div>
+                  {confirmKickTarget && (
+                    <div
+                      className="tp-confirm-box danger"
+                      role="alertdialog"
+                      aria-label="Confirmar expulsión de participante"
+                    >
+                      <p>
+                        <strong>¿Seguro que quieres expulsar a este jugador?</strong>
+                      </p>
+                      <p className="card-desc">
+                        Se expulsará a <strong>{confirmKickTarget.name}</strong> y se revocará su
+                        acceso actual a la sala.
+                      </p>
+                      <div className="tp-confirm-actions">
+                        <button
+                          type="button"
+                          className="btn-danger"
+                          onClick={() => {
+                            void runTeacherCommand({
+                              kind: 'KICK_PLAYER',
+                              playerId: confirmKickTarget.id,
+                            });
+                            setConfirmKickTarget(null);
+                          }}
+                        >
+                          Confirmar expulsión
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => setConfirmKickTarget(null)}
+                        >
+                          Cancelar
+                        </button>
                       </div>
-                    ))}
+                    </div>
+                  )}
+                  <div className="tp-players-list">
+                    {listedParticipants.map((player) => {
+                      const isSelfOrHost = player.isTeacher || player.id === playerId;
+                      const isCurrentTurn = roomState.activePlayerId === player.id;
+                      return (
+                        <div key={player.id} className="tp-player-row">
+                          <span className="tp-player-name">
+                            <UserCheck size={15} /> {player.name}{' '}
+                            <span
+                              className={`tp-conn-pill ${
+                                player.connected ? 'connected' : 'disconnected'
+                              }`}
+                            >
+                              {player.connected ? 'Conectado' : 'Desconectado'}
+                            </span>
+                            {isCurrentTurn && (
+                              <span className="tp-active-turn-pill">Turno actual</span>
+                            )}
+                            {isSelfOrHost && (
+                              <span className="tp-host-badge">Anfitrión</span>
+                            )}
+                          </span>
+                          <div className="tp-player-actions">
+                            <select
+                              value={player.teamId}
+                              onChange={(e) =>
+                                runTeacherCommand({
+                                  kind: 'ASSIGN_TEAM',
+                                  playerId: player.id,
+                                  teamId: e.target.value,
+                                })
+                              }
+                              aria-label={`Cambiar equipo de ${player.name}`}
+                            >
+                              {roomState.teams.map((t) => (
+                                <option key={t.id} value={t.id}>
+                                  {t.name}
+                                </option>
+                              ))}
+                            </select>
+                            {!isSelfOrHost && (
+                              <button
+                                type="button"
+                                className="btn-kick-danger"
+                                title={`Expulsar a ${player.name}`}
+                                onClick={() => setConfirmKickTarget(player)}
+                              >
+                                <Trash2 size={14} /> <span>Expulsar</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </>
               );

@@ -173,6 +173,15 @@ function loadSessionPlayerToken(roomCode: string): string | undefined {
   }
 }
 
+function clearSessionPlayerToken(roomCode?: string): void {
+  if (typeof window === 'undefined' || !roomCode) return;
+  try {
+    window.sessionStorage.removeItem(`prl_oca_player_token_${normalizeRoomCode(roomCode)}`);
+  } catch {
+    // Ignore storage restriction
+  }
+}
+
 const FATAL_JOIN_ERRORS = new Set([
   'ROOM_NOT_FOUND',
   'ROOM_CLOSED',
@@ -182,6 +191,7 @@ const FATAL_JOIN_ERRORS = new Set([
   'ROOM_NOT_JOINABLE',
   'INVALID_TEACHER_PIN',
   'INVALID_PLAYER_TOKEN',
+  'PLAYER_KICKED',
   'JOIN_REJECTED',
 ]);
 
@@ -209,6 +219,8 @@ function mapRoomErrorMessage(code?: string, serverMessage?: string): string {
         serverMessage ||
         'Credencial de participante inválida o caducada (INVALID_PLAYER_TOKEN).'
       );
+    case 'PLAYER_KICKED':
+      return serverMessage || 'Has sido expulsado de la sala por el profesor.';
     case 'UNAUTHORIZED_PLAYER':
       return (
         serverMessage ||
@@ -315,7 +327,7 @@ export interface GameStore {
   selectTeamInLobby: (teamId: string) => void;
   toggleReadyInLobby: () => void;
   rollDice: () => void;
-  submitAnswer: (selectedIndices: number[], collaborated?: boolean) => void;
+  submitAnswer: (selection: string[] | number[], collaborated?: boolean) => void;
   completeChallenge3D: (selectedHotspotIds: string[]) => void;
   nextTurn: () => void;
   runTeacherCommand: (command: {
@@ -342,6 +354,31 @@ export interface GameStore {
 export const useGameStore = create<GameStore>((set, get) => {
   const inFlightSlotActions = new Set<string>();
   const pendingSlotActionIds = new Map<string, string>();
+  const inFlightTeacherActions = new Set<string>();
+
+  const evictToJoinScreen = (errorMessage: string, code?: string) => {
+    const activeCode = get().roomState?.roomCode;
+    clearMovementTimers();
+    clearPendingWsActionFallback();
+    if (activeCode) {
+      clearPendingRoomSlots(activeCode);
+      if (code === 'PLAYER_KICKED' || code === 'ROOM_CLOSED' || code === 'INVALID_PLAYER_TOKEN') {
+        clearSessionPlayerToken(activeCode);
+      }
+    }
+    mpClient.disconnect();
+    set({
+      roomState: null,
+      isRemoteSession: false,
+      ...(code === 'PLAYER_KICKED' ? { playerToken: '' } : {}),
+      screen: 'create_join',
+      createJoinTab: 'join',
+      errorMessage,
+      isRollingAnimation: false,
+      isTokenMoving: false,
+      challengeModalReady: true,
+    });
+  };
 
   const buildRollSlotKey = (room: GameRoomState): string =>
     `${normalizeRoomCode(room.roomCode)}:${room.turnNumber}:${room.lastDiceRoll?.timestamp ?? 0}:waiting_roll:ROLL_DICE`;
@@ -474,6 +511,10 @@ export const useGameStore = create<GameStore>((set, get) => {
         pendingSlotActionIds.delete(slotKey);
       }
       onFailureReset?.();
+      if (data?.error === 'PLAYER_KICKED' || data?.error === 'ROOM_CLOSED') {
+        evictToJoinScreen(mapRoomErrorMessage(data.error, data.message), data.error);
+        return false;
+      }
       const diagnostic = formatServerHttpDiagnostic({
         status: res.status,
         errorCode: data?.error,
@@ -638,7 +679,8 @@ export const useGameStore = create<GameStore>((set, get) => {
           submitAnswerServerSide(
             st,
             'bot_companero',
-            st.activeChallenge.question.correctIndices,
+            st.activeChallenge.question.correctOptionIds ??
+              st.activeChallenge.question.correctIndices,
             false
           );
         } else if (
@@ -965,22 +1007,12 @@ export const useGameStore = create<GameStore>((set, get) => {
       const shouldLeaveToJoin =
         FATAL_JOIN_ERRORS.has(msg.code ?? '') &&
         (get().screen !== 'game' ||
+          msg.code === 'PLAYER_KICKED' ||
           msg.code === 'ROOM_NOT_FOUND' ||
           msg.code === 'ROOM_CLOSED' ||
           msg.code === 'ROOM_FINISHED');
       if (shouldLeaveToJoin) {
-        clearMovementTimers();
-        mpClient.disconnect();
-        set({
-          roomState: null,
-          isRemoteSession: false,
-          screen: 'create_join',
-          createJoinTab: 'join',
-          errorMessage: formattedErr,
-          isRollingAnimation: false,
-          isTokenMoving: false,
-          challengeModalReady: true,
-        });
+        evictToJoinScreen(formattedErr, msg.code);
         return;
       }
       set((prev) => ({
@@ -1870,7 +1902,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       }, 1150);
     },
 
-    submitAnswer: (selectedIndices, collaborated = true) => {
+    submitAnswer: (selection, collaborated = true) => {
       const state = get().roomState;
       if (!state) return;
 
@@ -1883,11 +1915,14 @@ export const useGameStore = create<GameStore>((set, get) => {
 
       const pToken = get().playerToken || loadSessionPlayerToken(state.roomCode);
       const slotKey = buildAnswerSlotKey(state, 'SUBMIT_ANSWER');
+      const isOptionIdList = selection.length > 0 && typeof selection[0] === 'string';
       const msg = {
         type: 'SUBMIT_ANSWER' as const,
         actionId: getOrCreateIdempotentActionId(slotKey, 'ans'),
         playerId,
-        selectedIndices,
+        ...(isOptionIdList
+          ? { selectedOptionIds: selection as string[] }
+          : { selectedIndices: selection as number[] }),
         collaborated,
         playerToken: pToken,
       };
@@ -1902,7 +1937,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
-      const res = submitAnswerServerSide(state, playerId, selectedIndices, collaborated);
+      const res = submitAnswerServerSide(state, playerId, selection, collaborated);
       if (!res.ok) {
         set({ errorMessage: res.error ?? null });
         return;
@@ -2052,9 +2087,6 @@ export const useGameStore = create<GameStore>((set, get) => {
     runTeacherCommand: async (command) => {
       const state = get().roomState;
       if (!state) return;
-      clearMovementTimers();
-      soundEngine.playSfx('button_click');
-      set({ errorMessage: null });
 
       const normalizedCode = normalizeRoomCode(state.roomCode);
       const mustUseRemote = get().isRemoteSession || !isLocalFallbackEnabled();
@@ -2063,9 +2095,25 @@ export const useGameStore = create<GameStore>((set, get) => {
         { type: 'TEACHER_ACTION' }
       >['command'];
 
+      const lockKey = `${normalizedCode}:${teacherCmd.kind}:${
+        'playerId' in teacherCmd ? teacherCmd.playerId : `${state.turnNumber}:${state.activePlayerId ?? ''}`
+      }`;
+      if (inFlightTeacherActions.has(lockKey)) {
+        return;
+      }
+      inFlightTeacherActions.add(lockKey);
+      setTimeout(() => inFlightTeacherActions.delete(lockKey), 1400);
+
+      clearMovementTimers();
+      soundEngine.playSfx('button_click');
+      set({ errorMessage: null });
+
+      const actionId = `tcmd_${teacherCmd.kind}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
       const sendHttpTeacherAction = async () => {
         const apiBase = resolveApiBaseUrl();
         if (!apiBase) {
+          inFlightTeacherActions.delete(lockKey);
           set({
             errorMessage:
               'Sin conexión con el servidor Cloudflare Workers. Revisa tu conexión antes de iniciar.',
@@ -2083,6 +2131,7 @@ export const useGameStore = create<GameStore>((set, get) => {
               'X-Teacher-Token': get().teacherToken,
             },
             body: JSON.stringify({
+              actionId,
               teacherToken: get().teacherToken,
               command: teacherCmd,
             }),
@@ -2090,6 +2139,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           const data = (await res.json().catch(() => null)) as {
             ok?: boolean;
             error?: string;
+            message?: string;
             startedAt?: number;
             state?: GameRoomState;
           } | null;
@@ -2097,6 +2147,7 @@ export const useGameStore = create<GameStore>((set, get) => {
           if (!res.ok || !data?.ok || !data.state) {
             set({
               errorMessage:
+                data?.message ??
                 data?.error ??
                 `No se pudo sincronizar la acción docente (${teacherCmd.kind}) con el servidor.`,
             });
@@ -2121,6 +2172,8 @@ export const useGameStore = create<GameStore>((set, get) => {
             errorMessage:
               'Error de red al enviar la orden del docente al servidor Cloudflare Workers.',
           });
+        } finally {
+          inFlightTeacherActions.delete(lockKey);
         }
       };
 
@@ -2130,7 +2183,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         );
         const sent = mpClient.send({
           type: 'TEACHER_ACTION',
-          actionId: `tcmd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          actionId,
           teacherToken: get().teacherToken,
           command: teacherCmd,
         });
@@ -2158,6 +2211,7 @@ export const useGameStore = create<GameStore>((set, get) => {
         return;
       }
 
+      inFlightTeacherActions.delete(lockKey);
       // Pure offline / demo fallback (only when no backend room was created)
       const res = executeTeacherCommandServerSide(state, command, get().questionBank);
       if (!res.ok) {
